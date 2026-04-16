@@ -1,6 +1,6 @@
 services:
   collector:
-    build: .
+    image: ghcr.io/transmitt0r/adsb-collector:latest
     restart: unless-stopped
     environment:
       ADSB_URL: ${ADSB_URL:-http://localhost/tar1090/data/aircraft.json}
