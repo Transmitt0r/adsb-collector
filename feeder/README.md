@@ -14,7 +14,7 @@ The entire feeder stack runs via Docker using `docker-compose.feeder.yml` in the
 
 2. Run on the Pi:
    ```bash
-   docker compose -f docker-compose.feeder.yml up -d
+   cd feeder && docker compose up -d
    ```
 
 3. tar1090 web UI will be available at `http://flighttracker.local`
