@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 
@@ -10,7 +11,7 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from .config import Config
 from .tools import make_tools
@@ -21,11 +22,8 @@ APP_NAME = "adsb_digest"
 
 
 class DigestOutput(BaseModel):
-    text: str = Field(description="The full digest text in German.")
-    photo_url: str | None = Field(
-        default=None,
-        description="Direct image URL from lookup_photo for the featured aircraft, if available.",
-    )
+    text: str
+    photo_url: str | None = None
 
 SYSTEM_PROMPT = """
 You are a friendly aviation digest writer. Your job is to create an engaging,
@@ -64,7 +62,6 @@ Guidelines:
 - End with a fun aviation fact or something to look forward to next week
 - If lookup_photo returns a photo_url, include it in the photo_url output field
 - Write plain text only — no markdown, no headers (##), no bold (**text**), no bullet points
-- The `text` field must contain ONLY the digest body — no preamble like "Hier ist dein Digest:" or closing remarks
 
 Workflow:
 1. Call get_sightings, get_records, get_new_aircraft, and get_squawk_alerts in parallel
@@ -73,6 +70,9 @@ Workflow:
 4. Call lookup_aircraft for interesting ones to get operator/type info
 5. Call lookup_photo for the single most interesting aircraft
 6. Write the digest — always anchor each flight to the receiver
+7. Finally, output ONLY a JSON object on a single line with this exact structure:
+   {"text": "<digest body>", "photo_url": "<url or null>"}
+   No other text before or after the JSON.
 """.strip()
 
 
@@ -84,7 +84,6 @@ def create_runner(config: Config) -> Runner:
         description="Generates engaging weekly flight digests from ADS-B data.",
         instruction=SYSTEM_PROMPT,
         tools=tools,
-        output_schema=DigestOutput,
     )
     session_service = InMemorySessionService()
     return Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
@@ -114,18 +113,23 @@ async def generate_digest(runner: Runner, days: int = 7) -> DigestOutput:
         parts=[types.Part(text=prompt)],
     )
 
-    raw_json = ""
+    final_text = ""
     async for event in runner.run_async(
         user_id=user_id,
         session_id=session_id,
         new_message=message,
     ):
         if event.is_final_response() and event.content and event.content.parts:
-            raw_json = event.content.parts[0].text
+            final_text = event.content.parts[0].text
 
-    if not raw_json:
+    if not final_text:
         raise RuntimeError("Agent produced no output")
 
-    result = DigestOutput.model_validate_json(raw_json)
+    # Extract the JSON object the agent was instructed to output last
+    start = final_text.rfind("{")
+    end = final_text.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise RuntimeError(f"No JSON found in agent output: {final_text!r}")
+    result = DigestOutput.model_validate_json(final_text[start:end])
     logger.info("Digest generated (%d chars, photo=%s)", len(result.text), bool(result.photo_url))
     return result
