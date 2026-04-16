@@ -31,12 +31,10 @@ def main() -> None:
     logger.info("Creating ADK runner")
     runner = create_runner(config)
 
-    logger.info("Building Telegram app")
-    app = build_app(config, runner)
+    scheduler = create_scheduler(config, runner)
 
-    scheduler = create_scheduler(config, runner, app)
-    scheduler.start()
-    logger.info("Scheduler started")
+    logger.info("Building Telegram app")
+    app = build_app(config, runner, scheduler)
 
     if config.admin_chat_id is None:
         logger.warning(

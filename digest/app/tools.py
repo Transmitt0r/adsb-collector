@@ -111,4 +111,43 @@ def make_tools(collector_database_url: str) -> list:
             logger.exception("lookup_aircraft failed for %s", icao_hex)
             return json.dumps({"error": str(exc)})
 
-    return [get_sightings, lookup_aircraft]
+    def lookup_route(callsign: str) -> str:
+        """Look up the origin and destination airports for a flight callsign.
+
+        Uses the public adsbdb.com API. Returns a JSON string with origin and
+        destination airport details (IATA/ICAO codes, city, country), or an
+        error message if the route is not known.
+
+        Args:
+            callsign: The flight callsign (e.g. "DLH123", "EZY4241").
+        """
+        try:
+            url = f"https://api.adsbdb.com/v0/callsign/{callsign.upper().strip()}"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 404:
+                return json.dumps({"error": "route not found in database"})
+            resp.raise_for_status()
+            data = resp.json()
+            route = data.get("response", {}).get("flightroute", {})
+            if not route:
+                return json.dumps({"error": "no route data available"})
+
+            def _airport(ap: dict) -> dict:
+                return {
+                    "iata": ap.get("iata_code"),
+                    "icao": ap.get("icao_code"),
+                    "name": ap.get("name"),
+                    "city": ap.get("municipality"),
+                    "country": ap.get("country_name"),
+                }
+
+            return json.dumps({
+                "callsign": route.get("callsign"),
+                "origin": _airport(route.get("origin", {})),
+                "destination": _airport(route.get("destination", {})),
+            })
+        except Exception as exc:
+            logger.exception("lookup_route failed for %s", callsign)
+            return json.dumps({"error": str(exc)})
+
+    return [get_sightings, lookup_aircraft, lookup_route]

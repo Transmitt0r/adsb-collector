@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from telegram.ext import Application
 
 from .agent import Runner, generate_digest
 from .bot import broadcast
@@ -23,7 +22,7 @@ def _week_bounds() -> tuple[datetime, datetime]:
     return now - timedelta(days=7), now
 
 
-async def run_weekly_digest(config: Config, runner: Runner, app: Application) -> None:
+async def run_weekly_digest(config: Config, runner: Runner) -> None:
     logger.info("Weekly digest job started")
     period_start, period_end = _week_bounds()
 
@@ -37,11 +36,11 @@ async def run_weekly_digest(config: Config, runner: Runner, app: Application) ->
         text = await generate_digest(runner, days=7)
         cache_digest(config.database_url, period_start, period_end, text)
 
-    await broadcast(config, text, app)
+    await broadcast(config, text)
     logger.info("Weekly digest sent")
 
 
-def create_scheduler(config: Config, runner: Runner, app: Application) -> AsyncIOScheduler:
+def create_scheduler(config: Config, runner: Runner) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
 
     # Parse DIGEST_SCHEDULE as a cron expression (e.g. "0 8 * * 0" = Sunday 8am)
@@ -58,7 +57,7 @@ def create_scheduler(config: Config, runner: Runner, app: Application) -> AsyncI
     scheduler.add_job(
         run_weekly_digest,
         trigger=trigger,
-        kwargs={"config": config, "runner": runner, "app": app},
+        kwargs={"config": config, "runner": runner},
         name="weekly_digest",
     )
 

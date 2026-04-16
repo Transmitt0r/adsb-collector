@@ -31,6 +31,10 @@ Guidelines:
 - Write in German (casual, warm tone — like telling a friend)
 - Use airline names, not ICAO codes (e.g. "Ryanair" not "RYR")
 - Mention aircraft types in plain language (e.g. "ein Airbus A320" not "A20N")
+- Always mention where flights are coming from and going to — that's the most
+  interesting part! Use lookup_route to find origin and destination airports for
+  the highlighted flights and describe them in plain language (e.g. "von London
+  Heathrow nach Istanbul")
 - Highlight anything unusual: private jets, military aircraft, rare types, night flights
 - Look up interesting aircraft (private jets, unknown callsigns, unusual hex codes)
   using the lookup_aircraft tool
@@ -40,8 +44,9 @@ Guidelines:
 Workflow:
 1. Call get_sightings to get the flight data
 2. Identify the most interesting 3-5 aircraft/sightings to highlight
-3. Call lookup_aircraft for those interesting ones to get operator/type info
-4. Write the digest
+3. Call lookup_route for each highlighted flight to get origin/destination
+4. Call lookup_aircraft for those interesting ones to get operator/type info
+5. Write the digest — always lead with where each featured flight was headed
 """.strip()
 
 
@@ -72,7 +77,7 @@ async def generate_digest(runner: Runner, days: int = 7) -> str:
 
     prompt = (
         f"Erstelle einen Digest der letzten {days} Tage. "
-        "Nutze get_sightings und lookup_aircraft für interessante Flugzeuge."
+        "Nutze get_sightings, dann lookup_route und lookup_aircraft für die interessantesten Flüge."
     )
 
     message = types.Content(
