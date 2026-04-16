@@ -48,7 +48,7 @@ services:
       GZIP_LVL: 1
       PTRACKS: 8
     ports:
-      - "8080:80"
+      - "8082:80"
 
   fr24feed:
     image: ghcr.io/sdr-enthusiasts/docker-flightradar24:latest

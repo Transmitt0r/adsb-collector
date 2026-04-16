@@ -21,7 +21,7 @@ feeder/
 ## Key facts
 
 - RTL-SDR dongle is passed through via `devices: [/dev/bus/usb:/dev/bus/usb]`
-- tar1090 serves at `http://flighttracker.local/data/aircraft.json` (no `/tar1090/` prefix)
+- tar1090 serves at `http://flighttracker.local:8082/data/aircraft.json` (no `/tar1090/` prefix; port 8080 is taken by Traefik)
 - `dns: [127.0.0.11, <router-ip>]` is required for inter-container name resolution on this Pi
 - Coordinates and FR24 key are set as env vars in Coolify (`READSB_LAT`, `READSB_LON`, `FR24KEY`) — never commit these
 - Deployed via Coolify with the Pi configured as a remote server, compose file path `feeder/docker-compose.yml`
