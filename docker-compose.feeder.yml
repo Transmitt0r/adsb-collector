@@ -1,0 +1,60 @@
+services:
+  readsb:
+    image: ghcr.io/sdr-enthusiasts/docker-readsb-protobuf:latest
+    restart: unless-stopped
+    device_cgroup_rules:
+      - "c 189:* rwm"
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    environment:
+      TZ: Europe/Berlin
+      READSB_DEVICE_TYPE: rtlsdr
+      READSB_GAIN: autogain
+      READSB_LAT: YOUR_LAT
+      READSB_LON: YOUR_LON
+      READSB_MAX_RANGE: 450
+      READSB_NET_ENABLE: "true"
+      READSB_NET_HEARTBEAT: 60
+      READSB_NET_RAW_OUTPUT_SIZE: 1250
+      READSB_NET_RAW_OUTPUT_INTERVAL: 0.05
+      READSB_JSON_LOCATION_ACCURACY: 2
+      READSB_RANGE_OUTLINE_HOURS: 24
+    ports:
+      - "30001:30001"
+      - "30002:30002"
+      - "30003:30003"
+      - "30004:30004"
+      - "30005:30005"
+    volumes:
+      - readsb_run:/run/readsb
+
+  tar1090:
+    image: ghcr.io/sdr-enthusiasts/docker-tar1090:latest
+    restart: unless-stopped
+    depends_on:
+      - readsb
+    environment:
+      TZ: Europe/Berlin
+      BEASTHOST: readsb
+      BEASTPORT: 30005
+      INTERVAL: 8
+      HISTORY_SIZE: 450
+      GZIP_LVL: 1
+      PTRACKS: 8
+    ports:
+      - "80:80"
+
+  fr24feed:
+    image: ghcr.io/sdr-enthusiasts/docker-flightradar24:latest
+    restart: unless-stopped
+    depends_on:
+      - readsb
+    environment:
+      TZ: Europe/Berlin
+      FR24KEY: YOUR_FR24_KEY_HERE
+      BEASTHOST: readsb
+      BEASTPORT: 30005
+      MLAT: "no"
+
+volumes:
+  readsb_run:
