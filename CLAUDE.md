@@ -1,35 +1,33 @@
 @README.md
 
-## Development Environment
+## Repo Structure
 
-This project uses a **Nix flake** for reproducible dev environments.
+Three independent components, each self-contained:
+
+| Component | Location | Runs on | Purpose |
+|-----------|----------|---------|---------|
+| Collector | `collector/` | NAS | Polls Pi every 5s, writes to TimescaleDB |
+| Digest | `digest/` | NAS | Weekly Telegram digest via ADK + Claude Haiku |
+| Feeder | `feeder/` | Pi | readsb + tar1090 + fr24feed in Docker |
+
+See each component's `CLAUDE.md` for details:
+- @collector/CLAUDE.md
+- @digest/CLAUDE.md
+- @feeder/CLAUDE.md
+
+## Dev Environment
+
+Nix devshell provides Python 3.13, ruff, mypy, psql:
 
 ```bash
-nix develop
+nix develop   # from repo root
 ```
 
-This provides Python 3.13 with all project dependencies, plus `ruff` and `mypy`. Do NOT use `pip install` globally — add new dependencies to both `pyproject.toml` and `flake.nix`.
+Each component has its own `pyproject.toml`. Run tools from within the component directory.
 
-## Project Goals
+## Infrastructure
 
-1. **Feeder config** — keep `feeder/` in sync with the Raspberry Pi (`tracker@flighttracker.local`)
-2. **Collector** — poll `http://flighttracker.local/tar1090/data/aircraft.json` every 5s and write to TimescaleDB
-
-## Key Facts
-
-- Pi SSH: `tracker@flighttracker.local`
-- Primary data endpoint: `http://flighttracker.local/tar1090/data/aircraft.json`
-- `alt_baro` can be the string `"ground"` — always type-check before using as int
-- `flight` callsign has trailing spaces — strip before storing
-- `seen` is seconds since last message — compute observation timestamp as `now - seen`
-- The collector uses asyncpg (not SQLAlchemy); pool.acquire() is a sync context manager
-
-## Quality Gates
-
-Before committing:
-```bash
-ruff check collector tests
-ruff format --check collector tests
-mypy collector
-pytest
-```
+- **Pi:** `tracker@flighttracker.local` — runs the feeder stack
+- **NAS:** `192.168.0.5` — runs collector (port 5431) and digest stacks
+- **Data endpoint:** `http://192.168.0.111/data/aircraft.json`
+- **TimescaleDB:** port 5431 on NAS

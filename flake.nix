@@ -34,6 +34,8 @@
 
             shellHook = ''
               echo "flighttracker dev shell"
+              echo "  collector: cd collector && python -m collector"
+              echo "  digest:    cd digest && python -m app"
             '';
           };
         });

@@ -27,7 +27,7 @@ jobs:
       - name: Build and push collector
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: collector/
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/transmitt0r/adsb-collector:latest
