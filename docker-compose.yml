@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: flighttracker
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: flighttracker
     volumes:
       - db_data:/var/lib/postgresql/data
@@ -15,6 +15,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  collector:
+    image: ghcr.io/transmitt0r/adsb-collector:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ADSB_URL: ${ADSB_URL}
+      POLL_INTERVAL: ${POLL_INTERVAL:-5}
+      SESSION_TIMEOUT: ${SESSION_TIMEOUT:-300}
+      DATABASE_URL: postgresql://flighttracker:${DB_PASSWORD}@db:5432/flighttracker
 
 volumes:
   db_data:
