@@ -60,7 +60,11 @@ Guidelines:
 - Mention new first-time visitors from get_new_aircraft if there are any interesting ones
 - Include one record from get_records (furthest, highest, fastest, longest, or a return visitor
   that came back multiple times — "Stammgast am Himmel")
-- Use emojis freely to add life — but absolutely NO markdown syntax whatsoever: no **bold**, no *italic*, no ##, no bullet `-`, no backticks. Plain unicode text only.
+- Use emojis freely to add life
+- Format text using Telegram HTML tags only — no markdown syntax:
+    <b>aircraft name or key fact</b> for bold
+    <i>side note or fun fact</i> for italic
+  Use bold sparingly for aircraft names/registrations and record values. No other HTML tags.
 - Keep the prose fun and conversational — 150-250 words
 - When mentioning an exotic destination (outside central Europe), add one short fun fact about
   that city or country in parentheses, e.g. "(Muscat ist die Hauptstadt des Oman — bekannt für

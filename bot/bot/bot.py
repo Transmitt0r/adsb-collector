@@ -96,13 +96,14 @@ def _debug(config: Config, runner: Runner):
 
 async def _send_digest(bot: Bot, chat_id: int, digest: DigestOutput) -> None:
     """Send digest text, then a follow-up photo if the agent found one."""
-    await bot.send_message(chat_id=chat_id, text=digest.text)
+    await bot.send_message(chat_id=chat_id, text=digest.text, parse_mode="HTML")
     if digest.photo_url:
         try:
             await bot.send_photo(
                 chat_id=chat_id,
                 photo=digest.photo_url,
                 caption=digest.photo_caption or None,
+                parse_mode="HTML",
             )
         except Exception:
             logger.warning("Failed to send follow-up photo to chat_id=%d", chat_id)
