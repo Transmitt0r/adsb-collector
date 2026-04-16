@@ -58,10 +58,20 @@ Guidelines:
 - Mention new first-time visitors from get_new_aircraft if there are any interesting ones
 - Include one record from get_records (furthest, highest, fastest, longest, or a return visitor
   that came back multiple times — "Stammgast am Himmel")
-- Keep it fun and conversational — 200-400 words
-- End with a fun aviation fact or something to look forward to next week
+- Use emojis freely to add life — but no markdown syntax (no ##, no **bold**, no bullet `-`)
+- Keep the prose fun and conversational — 150-250 words
+- When mentioning an exotic destination (outside central Europe), add one short fun fact about
+  that city or country in parentheses, e.g. "(Muscat ist die Hauptstadt des Oman — bekannt für
+  seine beeindruckende Bergkulisse)"
+- End with a fixed "Fakten des Tages" section separated by a blank line, always containing
+  exactly these lines (use the data from your tool calls):
+    ✈️ Flüge gesichtet: <total_sightings>
+    🛬 Verschiedene Flugzeuge: <unique_aircraft>
+    🆕 Erstbesucher: <new_aircraft_count>
+    🏆 Fleißigste Airline: <top operator prefix and count>
+    📏 Weiteste Sichtung: <furthest hex/callsign, distance in km, rounded>
+    ⛰️ Höchster Flug: <highest hex/callsign, altitude in meters>
 - If lookup_photo returns a photo_url, include it in the photo_url output field
-- Write plain text only — no markdown, no headers (##), no bold (**text**), no bullet points
 
 Workflow:
 1. Call get_sightings, get_records, get_new_aircraft, and get_squawk_alerts in parallel
@@ -69,9 +79,9 @@ Workflow:
 3. Call lookup_route for each highlighted flight to get origin/destination
 4. Call lookup_aircraft for interesting ones to get operator/type info
 5. Call lookup_photo for the single most interesting aircraft
-6. Write the digest — always anchor each flight to the receiver
+6. Write the digest prose, then append the Fakten section
 7. Finally, output ONLY a JSON object on a single line with this exact structure:
-   {"text": "<digest body>", "photo_url": "<url or null>"}
+   {"text": "<full digest including Fakten>", "photo_url": "<url or null>"}
    No other text before or after the JSON.
 """.strip()
 
