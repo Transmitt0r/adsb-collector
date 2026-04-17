@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -33,7 +32,7 @@ async def run_weekly_digest(config: Config) -> None:
         logger.info("Using cached digest")
     else:
         logger.info("Generating new digest")
-        digest = await asyncio.to_thread(generate_digest, config, 7)
+        digest = await generate_digest(config, 7)
         cache_digest(config.database_url, period_start, period_end, digest)
 
     await broadcast(config, digest)

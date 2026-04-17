@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+import uuid
 
-import anthropic
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from pydantic import BaseModel
 
 from .config import Config
 from .db import get_unenriched_aircraft, store_enrichment
@@ -14,68 +19,81 @@ from .tools import lookup_aircraft, lookup_route
 
 logger = logging.getLogger(__name__)
 
-_SCORE_PROMPT = """\
-Score this aircraft for story interest in a weekly aviation digest (1-10, 10 = most interesting).
+_APP_NAME = "score_agent"
 
-hex: {hex_}
-callsign: {callsign}
-aircraft data: {aircraft_json}
-route data: {route_json}
+_SYSTEM_PROMPT = """\
+Score this aircraft for story interest in a weekly aviation digest (score 1–10, 10 = most compelling).
 
 Scoring guide:
-- Military aircraft (any country, e.g. GAF, RCH, REACH, NATO): 9-10
-- Private/executive jet (Gulfstream, Bombardier Global, Dassault Falcon, etc.): 7-8
-- Long-haul exotic operator or unusual destination (intercontinental, Middle East, Asia): 6-8
-- Cargo aircraft or unusual type (A380, 747, C-130, etc.): 5-7
-- Unknown aircraft with no registration data: 5-6
-- Regular short-haul (Ryanair, Wizz, EasyJet, Eurowings, TUI, Condor): 1-3
-- Standard charter or regional flight: 3-5
+- Military aircraft (any country, e.g. GAF, RCH, REACH, NATO prefixes): 9–10
+- Private/executive jet (Gulfstream, Bombardier Global, Dassault Falcon, etc.): 7–8
+- Long-haul exotic operator or unusual destination (intercontinental, Middle East, Asia): 6–8
+- Cargo aircraft or unusual type (A380, 747F, C-130, etc.): 5–7
+- Unknown aircraft with no registration data: 5–6
+- Regular short-haul (Ryanair, Wizz, EasyJet, Eurowings, TUI, Condor): 1–3
+- Standard charter or regional flight: 3–5
 
-Also provide:
-- tags: 1-3 short English tags (e.g. ["military", "luftwaffe"] or ["private_jet", "us_registered"])
-- annotation: one German sentence about why this aircraft is interesting (empty string if not interesting)
-
-Output ONLY valid JSON (no explanation):
-{{"score": <int 1-10>, "tags": [<strings>], "annotation": "<string>"}}\
+Return:
+- score: int 1–10
+- tags: list of 1–3 short English tags, e.g. ["military", "luftwaffe"] or ["private_jet"]
+- annotation: one German sentence about why interesting; empty string if unremarkable\
 """
 
 
-def _score_and_annotate(
-    client: anthropic.Anthropic,
+class ScoreResult(BaseModel):
+    score: int
+    tags: list[str]
+    annotation: str
+
+
+async def _score_and_annotate(
     hex_: str,
     callsign: str | None,
     aircraft_json: str,
     route_json: str | None,
 ) -> dict:
-    """Call Haiku to score and annotate one aircraft. Never raises."""
+    """Run a scoring agent for one aircraft. Never raises — returns safe defaults on failure."""
     try:
-        prompt = _SCORE_PROMPT.format(
-            hex_=hex_,
-            callsign=callsign or "unknown",
-            aircraft_json=aircraft_json,
-            route_json=route_json or "unknown",
+        agent = LlmAgent(
+            model=LiteLlm(model="anthropic/claude-haiku-4-5-20251001"),
+            name="score_agent",
+            instruction=_SYSTEM_PROMPT,
+            output_schema=ScoreResult,
         )
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=150,
-            messages=[{"role": "user", "content": prompt}],
+        session_service = InMemorySessionService()
+        runner = Runner(
+            agent=agent, app_name=_APP_NAME, session_service=session_service
         )
-        text = response.content[0].text
-        match = re.search(r"\{[^{}]+\}", text, re.DOTALL)
-        if match:
-            result = json.loads(match.group())
-            return {
-                "score": int(result.get("score", 3)),
-                "tags": list(result.get("tags", [])),
-                "annotation": str(result.get("annotation", "")),
-            }
-        logger.warning("No JSON in score response for %s: %s", hex_, text[:200])
+
+        session_id = str(uuid.uuid4())
+        await session_service.create_session(
+            app_name=_APP_NAME, user_id="enrichment", session_id=session_id
+        )
+
+        data = (
+            f"hex: {hex_}\n"
+            f"callsign: {callsign or 'unknown'}\n"
+            f"aircraft data: {aircraft_json}\n"
+            f"route data: {route_json or 'unknown'}"
+        )
+        message = types.Content(role="user", parts=[types.Part(text=data)])
+
+        async for event in runner.run_async(
+            user_id="enrichment", session_id=session_id, new_message=message
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                result = ScoreResult.model_validate_json(event.content.parts[0].text)
+                return {
+                    "score": result.score,
+                    "tags": result.tags,
+                    "annotation": result.annotation,
+                }
     except Exception:
         logger.exception("_score_and_annotate failed for %s", hex_)
     return {"score": 3, "tags": [], "annotation": ""}
 
 
-def run_enrichment(config: Config) -> None:
+async def run_enrichment(config: Config) -> None:
     """Enrich up to 50 unenriched aircraft. Called every 15 minutes by the scheduler."""
     try:
         rows = get_unenriched_aircraft(config.database_url, limit=50)
@@ -88,7 +106,6 @@ def run_enrichment(config: Config) -> None:
         return
 
     logger.info("Enriching %d aircraft", len(rows))
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key)
 
     for hex_, callsign in rows:
         try:
@@ -97,8 +114,8 @@ def run_enrichment(config: Config) -> None:
             aircraft_dict = json.loads(aircraft_json)
             route_dict = json.loads(route_json) if route_json else None
 
-            score_result = _score_and_annotate(
-                client, hex_, callsign, aircraft_json, route_json
+            score_result = await _score_and_annotate(
+                hex_, callsign, aircraft_json, route_json
             )
             store_enrichment(
                 config.database_url,

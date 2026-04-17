@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from .bot import build_app
 from .config import Config
@@ -18,6 +19,9 @@ logger = logging.getLogger("digest")
 
 def main() -> None:
     config = Config.from_env()
+
+    # Set API key for LiteLLM (used by ADK agents in enrichment and digest)
+    os.environ["ANTHROPIC_API_KEY"] = config.anthropic_api_key
 
     logger.info("Initializing bot database")
     init_schema(config.database_url)

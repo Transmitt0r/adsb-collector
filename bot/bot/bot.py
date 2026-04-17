@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from telegram import Bot, Update
@@ -90,7 +89,7 @@ def _debug(config: Config):
             "⏳ Generiere Digest… (kann eine Minute dauern)"
         )
         try:
-            digest = await asyncio.to_thread(generate_digest, config, 1)
+            digest = await generate_digest(config, 1)
             chart = generate_traffic_chart(config.database_url, days=1)
             bot = update.get_bot()
             await _send_digest(bot, update.effective_chat.id, digest, chart)

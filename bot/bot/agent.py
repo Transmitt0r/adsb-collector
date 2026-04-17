@@ -1,12 +1,16 @@
-"""Digest generation: single Anthropic SDK call from pre-enriched data."""
+"""Digest generation: ADK agent with structured output from pre-enriched data."""
 
 from __future__ import annotations
 
 import json
 import logging
-import re
+import uuid
 
-import anthropic
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
 from pydantic import BaseModel
 
 from .config import Config
@@ -14,6 +18,8 @@ from .db import get_digest_candidates, get_digest_stats
 from .tools import lookup_photo
 
 logger = logging.getLogger(__name__)
+
+_APP_NAME = "adsb_digest"
 
 
 class DigestOutput(BaseModel):
@@ -57,8 +63,7 @@ Beispiel: "Ryanair war wieder fleißigster Gast mit X Flügen, hauptsächlich Ri
 Mittelmeer."
 
 <b>🆕 Neue Gesichter</b>
-2-3 der interessantesten Erstbesucher aus den Kandidaten mit is_new_aircraft=true.
-Falls keine interessanten dabei, ein kurzer Satz.
+2-3 der interessantesten Erstbesucher. Falls keine interessanten dabei, ein kurzer Satz.
 
 <b>📊 Fakten der Woche</b>
 Genau diese Zeilen mit echten Daten:
@@ -69,12 +74,8 @@ Genau diese Zeilen mit echten Daten:
 ⛰️ Höchster Flug: <callsign oder Reg>, <altitude m>
 
 Falls ein Notfall-Squawk vorhanden: mache ihn zur Eröffnungsgeschichte der Highlights.
-Falls photo_url verfügbar: setze es im Output mit einer kurzen photo_caption.
-
-Gib am Ende NUR diesen JSON-Block aus (nichts danach):
-```json
-{"text": "<vollständiger Digest>", "photo_url": "<url oder null>", "photo_caption": "<caption oder null>"}
-```
+Falls photo_url in den Kandidatendaten vorhanden: verwende es für photo_url und
+schreibe eine kurze photo_caption (z.B. "📸 D-ABCD — Airbus A320, Lufthansa").
 """.strip()
 
 
@@ -115,7 +116,6 @@ def _build_data_packet(
             f"\n[{i}] callsign={callsign}  hex={hex_}  score={score}  tags=[{tags}]"
         ]
 
-        # Registration / type / operator
         reg_parts = []
         if c.get("type"):
             reg_parts.append(f"Typ: {c['type']}")
@@ -125,12 +125,10 @@ def _build_data_packet(
             reg_parts.append(f"Betreiber: {c['operator']}")
         if c.get("flag"):
             reg_parts.append(c["flag"])
-        if reg_parts:
-            block.append("  " + " | ".join(reg_parts))
-        else:
-            block.append("  Keine Registrierungsdaten")
+        block.append(
+            "  " + (" | ".join(reg_parts) if reg_parts else "Keine Registrierungsdaten")
+        )
 
-        # Route
         route_parts = []
         if c.get("origin_city"):
             origin = c["origin_city"]
@@ -149,7 +147,6 @@ def _build_data_packet(
         if route_parts:
             block.append("  Route: " + " → ".join(route_parts))
 
-        # Flight profile
         profile_parts = [f"Besuche: {c['visit_count']}x"]
         if c.get("closest_nm") is not None:
             km = round(float(c["closest_nm"]) * 1.852, 1)
@@ -164,11 +161,10 @@ def _build_data_packet(
         if c.get("lm_annotation"):
             block.append(f"  KI-Notiz: {c['lm_annotation']}")
 
-        # Photo
         photo = photos.get(hex_)
         if photo and photo.get("photo_url"):
             photographer = photo.get("photographer", "")
-            caption = f"{c.get('registration') or hex_}"
+            caption = c.get("registration") or hex_
             if c.get("type"):
                 caption += f" — {c['type']}"
             if photographer:
@@ -180,18 +176,16 @@ def _build_data_packet(
     return "\n".join(lines)
 
 
-def generate_digest(config: Config, days: int = 7) -> DigestOutput:
-    """Generate a digest from pre-enriched data with a single Haiku call."""
+async def generate_digest(config: Config, days: int = 7) -> DigestOutput:
+    """Generate a digest from pre-enriched data with a single ADK agent call."""
     candidates = get_digest_candidates(config.database_url, days)
     stats = get_digest_stats(config.database_url, days)
 
-    # Fetch photos for the top 2 candidates by story_score
     photos: dict[str, dict] = {}
     for candidate in candidates[:2]:
         hex_ = candidate["hex"]
         try:
-            photo_json = lookup_photo(hex_)
-            photo_data = json.loads(photo_json)
+            photo_data = json.loads(lookup_photo(hex_))
             if "error" not in photo_data:
                 photos[hex_] = photo_data
         except Exception:
@@ -199,32 +193,37 @@ def generate_digest(config: Config, days: int = 7) -> DigestOutput:
 
     data_packet = _build_data_packet(candidates, stats, photos)
     logger.info(
-        "Digest data packet: %d candidates, %d chars",
-        len(candidates),
-        len(data_packet),
+        "Digest data packet: %d candidates, %d chars", len(candidates), len(data_packet)
     )
 
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": data_packet}],
+    agent = LlmAgent(
+        model=LiteLlm(model="anthropic/claude-haiku-4-5-20251001"),
+        name="flight_digest_agent",
+        description="Generates engaging weekly flight digests from ADS-B data.",
+        instruction=SYSTEM_PROMPT,
+        output_schema=DigestOutput,
     )
-    final_text = response.content[0].text
-    logger.info(
-        "Digest response: %d chars, input_tokens=%d output_tokens=%d",
-        len(final_text),
-        response.usage.input_tokens,
-        response.usage.output_tokens,
+    session_service = InMemorySessionService()
+    runner = Runner(agent=agent, app_name=_APP_NAME, session_service=session_service)
+
+    session_id = str(uuid.uuid4())
+    await session_service.create_session(
+        app_name=_APP_NAME, user_id="digest_job", session_id=session_id
     )
 
-    match = re.search(r"```json\s*(\{.*?\})\s*```", final_text, re.DOTALL)
-    if not match:
-        logger.error("No JSON block in digest response. Tail: %s", final_text[-300:])
-        raise RuntimeError(f"No JSON block found in digest output: {final_text!r}")
+    message = types.Content(role="user", parts=[types.Part(text=data_packet)])
 
-    result = DigestOutput.model_validate_json(match.group(1))
+    final_text = ""
+    async for event in runner.run_async(
+        user_id="digest_job", session_id=session_id, new_message=message
+    ):
+        if event.is_final_response() and event.content and event.content.parts:
+            final_text = event.content.parts[0].text
+
+    if not final_text:
+        raise RuntimeError("Agent produced no output")
+
+    result = DigestOutput.model_validate_json(final_text)
     logger.info(
         "Digest generated (%d chars, photo=%s)",
         len(result.text),

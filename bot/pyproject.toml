@@ -11,13 +11,15 @@ version = "0.1.0"
 description = "Weekly ADS-B flight digest agent via Telegram"
 requires-python = ">=3.13"
 dependencies = [
-    "anthropic>=0.30",
+    "google-adk>=0.5",
+    "litellm>=1.50",
     "python-telegram-bot>=21.0",
     "psycopg2-binary>=2.9",
     "requests>=2.31",
     "apscheduler>=3.10",
     "matplotlib>=3.9",
 ]
+
 
 [project.scripts]
 squawk-bot = "bot.__main__:main"
