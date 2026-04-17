@@ -40,21 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: astral-sh/setup-uv@v8.1.0
-        with:
-          enable-cache: true
-
-      - name: Install dbmate
-        run: |
-          curl -fsSL -o /usr/local/bin/dbmate \
-            https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-amd64
-          chmod +x /usr/local/bin/dbmate
-
-      - name: Install dependencies
-        run: uv sync
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
 
       - name: Run pre-commit hooks
-        run: uvx pre-commit run --all-files
+        run: nix develop --command uvx pre-commit run --all-files
 
   test-bot:
     name: Bot — lint & test
