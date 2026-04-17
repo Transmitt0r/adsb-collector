@@ -74,106 +74,23 @@ Genau diese Zeilen mit echten Daten:
 ⛰️ Höchster Flug: <callsign oder Reg>, <altitude m>
 
 Falls ein Notfall-Squawk vorhanden: mache ihn zur Eröffnungsgeschichte der Highlights.
-Falls photo_url in den Kandidatendaten vorhanden: verwende es für photo_url und
+Falls ein Kandidat ein photo-Objekt hat: verwende photo_url für das Ausgabefeld und
 schreibe eine kurze photo_caption (z.B. "📸 D-ABCD — Airbus A320, Lufthansa").
+
+Die Eingabe ist ein JSON-Objekt mit den Feldern "stats" und "candidates".
 """.strip()
 
 
 def _build_data_packet(
     candidates: list[dict], stats: dict, photos: dict[str, dict]
 ) -> str:
-    lines = ["=== WOCHENSTATISTIK ==="]
-    lines.append(
-        f"Flüge: {stats['total_sightings']} | "
-        f"Verschiedene Flugzeuge: {stats['unique_aircraft']} | "
-        f"Erstbesucher: {stats['new_aircraft']}"
+    for c in candidates:
+        photo = photos.get(c["hex"])
+        if photo:
+            c["photo"] = photo
+    return json.dumps(
+        {"stats": stats, "candidates": candidates}, ensure_ascii=False, default=str
     )
-    if stats.get("peak_hour") is not None:
-        lines.append(
-            f"Stoßzeit: {stats['peak_hour']:02d}:00 Uhr ({stats.get('peak_count', '?')} Flüge)"
-        )
-    if stats.get("squawk_alerts"):
-        for alert in stats["squawk_alerts"]:
-            lines.append(
-                f"⚠️ NOTFALL-SQUAWK {alert['squawk']} ({alert['meaning']}): "
-                f"hex={alert['hex']} um {alert['time']}"
-            )
-    else:
-        lines.append("Notfall-Squawks: keine")
-
-    lines.append("")
-    lines.append(
-        f"=== TOP-KANDIDATEN ({len(candidates)} Flugzeuge, sortiert nach Interesse) ==="
-    )
-
-    for i, c in enumerate(candidates, 1):
-        hex_ = c["hex"]
-        score = c.get("story_score") or "?"
-        tags = ", ".join(c.get("story_tags") or []) or "-"
-        callsign = c.get("callsign") or "-"
-
-        block = [
-            f"\n[{i}] callsign={callsign}  hex={hex_}  score={score}  tags=[{tags}]"
-        ]
-
-        reg_parts = []
-        if c.get("type"):
-            reg_parts.append(f"Typ: {c['type']}")
-        if c.get("registration"):
-            reg_parts.append(f"Reg: {c['registration']}")
-        if c.get("operator"):
-            reg_parts.append(f"Betreiber: {c['operator']}")
-        if c.get("flag"):
-            reg_parts.append(c["flag"])
-        block.append(
-            "  " + (" | ".join(reg_parts) if reg_parts else "Keine Registrierungsdaten")
-        )
-
-        route_parts = []
-        if c.get("origin_city"):
-            origin = c["origin_city"]
-            if c.get("origin_country"):
-                origin += f" ({c['origin_country']})"
-            if c.get("origin_iata"):
-                origin += f" [{c['origin_iata']}]"
-            route_parts.append(origin)
-        if c.get("dest_city"):
-            dest = c["dest_city"]
-            if c.get("dest_country"):
-                dest += f" ({c['dest_country']})"
-            if c.get("dest_iata"):
-                dest += f" [{c['dest_iata']}]"
-            route_parts.append(dest)
-        if route_parts:
-            block.append("  Route: " + " → ".join(route_parts))
-
-        profile_parts = [f"Besuche: {c['visit_count']}x"]
-        if c.get("closest_nm") is not None:
-            km = round(float(c["closest_nm"]) * 1.852, 1)
-            profile_parts.append(f"nächste Annäherung: {km} km")
-        if c.get("max_alt_ft") is not None:
-            m = round(int(c["max_alt_ft"]) / 3.281 / 100) * 100
-            profile_parts.append(f"max. Höhe: {m:,} m")
-        if c.get("first_seen_local"):
-            profile_parts.append(f"erste Sichtung: {c['first_seen_local']}")
-        block.append("  " + " | ".join(profile_parts))
-
-        if c.get("lm_annotation"):
-            block.append(f"  KI-Notiz: {c['lm_annotation']}")
-
-        photo = photos.get(hex_)
-        if photo and photo.get("photo_url"):
-            photographer = photo.get("photographer", "")
-            caption = c.get("registration") or hex_
-            if c.get("type"):
-                caption += f" — {c['type']}"
-            if photographer:
-                caption += f" (📸 {photographer})"
-            block.append(f"  Foto: {photo['photo_url']}  caption: {caption}")
-
-        lines.append("\n".join(block))
-
-    return "\n".join(lines)
 
 
 async def generate_digest(config: Config, days: int = 7) -> DigestOutput:
@@ -213,20 +130,16 @@ async def generate_digest(config: Config, days: int = 7) -> DigestOutput:
 
     message = types.Content(role="user", parts=[types.Part(text=data_packet)])
 
-    final_text = ""
     async for event in runner.run_async(
         user_id="digest_job", session_id=session_id, new_message=message
     ):
         if event.is_final_response() and event.content and event.content.parts:
-            final_text = event.content.parts[0].text
+            result = DigestOutput.model_validate_json(event.content.parts[0].text)
+            logger.info(
+                "Digest generated (%d chars, photo=%s)",
+                len(result.text),
+                bool(result.photo_url),
+            )
+            return result
 
-    if not final_text:
-        raise RuntimeError("Agent produced no output")
-
-    result = DigestOutput.model_validate_json(final_text)
-    logger.info(
-        "Digest generated (%d chars, photo=%s)",
-        len(result.text),
-        bool(result.photo_url),
-    )
-    return result
+    raise RuntimeError("Agent produced no output")
