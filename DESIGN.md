@@ -653,9 +653,9 @@ CREATE TABLE sightings (
     min_distance FLOAT,
     max_distance FLOAT
 );
--- sightings grows unboundedly; apply retention via TimescaleDB hypertable
-SELECT create_hypertable('sightings', 'started_at');
-SELECT add_retention_policy('sightings', INTERVAL '2 years');
+-- sightings is the permanent historical record of what flew overhead.
+-- No retention policy — rows are small (one per session, not per position fix)
+-- and the whole point is long-term queryability. ~70k rows/year at typical rates.
 
 CREATE TABLE position_updates (
     time     TIMESTAMPTZ NOT NULL,
