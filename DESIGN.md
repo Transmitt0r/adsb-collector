@@ -103,15 +103,10 @@ squawk/
     handlers.py              ← /start /stop /debug Telegram command handlers
     broadcaster.py           ← Broadcaster protocol + TelegramBroadcaster
 
-tests/
-  libs/
-    test_tar1090.py
-    test_eventbus.py
-  squawk/
-    test_repositories.py
-    test_actors.py
-    test_clients.py
 ```
+
+Tests are colocated with the code they test (e.g. `libs/tar1090/test_tar1090.py`,
+`squawk/actors/test_polling.py`). There is no top-level `tests/` directory.
 
 ---
 
@@ -375,15 +370,15 @@ class PhotoClient(Protocol):
     async def lookup(self, hex: str) -> PhotoInfo | None: ...
 
 # squawk/clients/gemini.py
+# Pydantic BaseModel (not dataclass) — passed directly to response_schema= for
+# constrained generation; same mechanism as ADK's output_schema=.
 
-@dataclass(frozen=True)
-class ScoreResult:
+class ScoreResult(BaseModel):
     score: int           # 1–10
     tags: list[str]
     annotation: str      # one German sentence; empty string if unremarkable
 
-@dataclass(frozen=True)
-class DigestOutput:
+class DigestOutput(BaseModel):
     text: str
     photo_url: str | None = None
     photo_caption: str | None = None
@@ -971,14 +966,46 @@ passing before the next phase begins.
 
 ### Phase 1 — Foundations & Validation
 
-- [ ] **1.1** Validate batch Gemini scoring: write a standalone script that sends
+- [x] **1.1** Validate batch Gemini scoring: write a standalone script that sends
       20 aircraft to Gemini with the proposed batch prompt and asserts the response
       is a valid JSON array of length 20. Document failure modes. Decide on fallback
       strategy (per-aircraft retry if array length mismatches).
-- [ ] **1.2** Validate PTB + asyncio.TaskGroup: write a minimal proof-of-concept
+
+      **Findings (gemini-3-flash-preview, 3 trials, 20 aircraft each):**
+      - 3/3 trials returned exactly 20 results — constrained generation enforces
+        array length at generation time; length mismatch is a defence-in-depth concern
+        rather than an observed failure mode.
+      - Latency: 15–27s per batch of 20. Acceptable given flush_interval=30s.
+      - `score` is returned as int (not float); `annotation` is empty string (not
+        null) for unremarkable aircraft — both match the ScoreResult schema.
+      - `ScoreResult` and `DigestOutput` in `gemini.py` must be Pydantic `BaseModel`
+        subclasses (not frozen dataclasses) so they can be passed directly to
+        `response_schema=list[ScoreResult]` — same mechanism as ADK's `output_schema`.
+      - **Prompt gap:** aircraft with squawk 7700 scored 2–3 despite the emergency
+        flag. The scoring prompt in GeminiClient must explicitly instruct the model
+        to assign score ≥ 9 for emergency squawk codes (7500/7600/7700).
+      - Fallback strategy: if `len(results) != len(input)`, log warning and fall
+        back to per-aircraft calls; per-aircraft failures return
+        `ScoreResult(score=1, tags=[], annotation="")` so the batch is not blocked.
+      - Validation script: `scripts/validate_gemini_batch.py`
+- [x] **1.2** Validate PTB + asyncio.TaskGroup: write a minimal proof-of-concept
       that runs `python-telegram-bot` alongside a dummy long-running coroutine under
       `asyncio.TaskGroup` using the low-level PTB API (`initialize` / `start` /
       `start_polling`). Must confirm graceful shutdown works.
+
+      **Findings (python-telegram-bot >= 21.0, 4 scenarios):**
+      - `try/finally` in `run_bot()` guarantees PTB teardown (`updater.stop()` /
+        `app.stop()` / `app.shutdown()`) even when the task receives `CancelledError`
+        from TaskGroup cancellation. `teardown_ran` flag confirmed this runs before
+        ExceptionGroup propagates to the caller.
+      - `asyncio.get_event_loop().create_future()` correctly receives `CancelledError`
+        when the task is cancelled — the 'run forever' pattern is safe.
+      - **TaskGroup cancellation semantics:** TaskGroup cancels remaining tasks only
+        when a sibling *raises*, not when it returns normally. In production all tasks
+        run forever; shutdown is always via SIGTERM or an exception — normal return
+        never occurs. The DESIGN.md wiring is correct.
+      - ExceptionGroup surfaces as expected; `except* RuntimeError` catches it cleanly.
+      - Validation script: `scripts/validate_ptb_taskgroup.py`
 - [ ] **1.3** Consolidate to single root `pyproject.toml`: merge all dependencies,
       remove uv workspace config, configure hatchling to include `libs/` and `squawk/`
       packages, add ruff banned-import rules (`libs/tar1090` and `libs/eventbus` may
@@ -987,7 +1014,7 @@ passing before the next phase begins.
       (`asyncpg`, `db.py`, `tracker.py`, `schema.sql`, `python-dotenv`); reduce
       public API to `poll(url, timeout) -> list[AircraftState]`; move HTTP logic
       to `_http.py`
-- [ ] **1.5** Move and update `tar1090` tests to `tests/libs/test_tar1090.py`
+- [ ] **1.5** Move and update `tar1090` tests to `libs/tar1090/test_tar1090.py`
 
 ### Phase 2 — Schema
 
@@ -1005,7 +1032,7 @@ passing before the next phase begins.
       `mark_processed(id, emitted_at)`, `fetch_unprocessed(since)`
 - [ ] **3.3** Implement `EventBus` in `eventbus/bus.py`: `subscribe()`, `emit()`
       (write to log + deliver to inbox), `replay_unprocessed()`
-- [ ] **3.4** Write `eventbus` tests in `tests/libs/test_eventbus.py`: subscribe/emit,
+- [ ] **3.4** Write `eventbus` tests in `libs/eventbus/test_eventbus.py`: subscribe/emit,
       inbox delivery, replay on startup, handler error does not crash bus,
       mark_processed uses composite key
 

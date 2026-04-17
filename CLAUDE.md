@@ -36,6 +36,17 @@ Each component has its own `pyproject.toml` and `uv.lock`. Run tools from within
 
 The Claude Code PostToolUse hook (`.claude/hooks/ruff-check.sh`) also runs ruff check immediately after each file edit, for faster feedback during development.
 
+## Testing
+
+Tests are colocated with the code they test — no top-level `tests/` directory.
+Examples: `libs/tar1090/test_tar1090.py`, `squawk/actors/test_polling.py`.
+
+## AI / LLM
+
+All AI and LLM calls go through **google-adk** (`google-adk` package). Do not use
+`google-genai` or any other AI SDK directly. Validation scripts and prototypes may
+use lower-level APIs, but production code in `squawk/` must go through google-adk.
+
 ## Infrastructure
 
 - **Pi:** `tracker@flighttracker.local` — runs the feeder stack

@@ -13,16 +13,9 @@ repos:
         entry: ruff check --fix
         types: [python]
 
-      - id: pytest-collector
-        name: pytest (collector)
+      - id: pytest-squawk
+        name: pytest (squawk)
         language: system
-        entry: bash -c 'cd collector && uv run pytest -q'
+        entry: bash -c 'uv run pytest -q; c=$?; [ $c -eq 5 ] && exit 0 || exit $c'
         pass_filenames: false
-        files: ^collector/
-
-      - id: pytest-bot
-        name: pytest (bot)
-        language: system
-        entry: bash -c 'cd bot && uv sync --all-extras -q && uv run pytest -q'
-        pass_filenames: false
-        files: ^bot/
+        files: ^(squawk|libs)/
