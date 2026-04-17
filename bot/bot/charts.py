@@ -40,13 +40,17 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                 """, {"days": days})
                 daily = cur.fetchall()
 
+                # Flights per hour split by weekday vs weekend (local time)
+                # DOW: 0=Sunday, 6=Saturday in PostgreSQL
                 cur.execute("""
                     SELECT
                         EXTRACT(HOUR FROM started_at AT TIME ZONE 'Europe/Berlin')::int AS hour,
+                        CASE WHEN EXTRACT(DOW FROM started_at AT TIME ZONE 'Europe/Berlin') IN (0, 6)
+                             THEN 'weekend' ELSE 'weekday' END AS day_type,
                         COUNT(*) AS flights
                     FROM sightings
                     WHERE started_at > now() - (%(days)s || ' days')::interval
-                    GROUP BY hour
+                    GROUP BY hour, day_type
                     ORDER BY hour
                 """, {"days": days})
                 hourly = cur.fetchall()
@@ -79,18 +83,30 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                     Patch(color="#e05c2a", label="Wochenende"),
                 ], fontsize=7, loc="upper left")
 
-            # --- hourly curve ---
+            # --- hourly stacked area (weekday vs weekend) ---
             if hourly:
-                hourly_map = {row[0]: row[1] for row in hourly}
+                wd_map: dict[int, int] = {}
+                we_map: dict[int, int] = {}
+                for hour, day_type, count in hourly:
+                    if day_type == "weekend":
+                        we_map[hour] = count
+                    else:
+                        wd_map[hour] = count
+
                 hours = list(range(24))
-                counts_h = [hourly_map.get(h, 0) for h in hours]
-                ax_hour.plot(hours, counts_h, color="steelblue", linewidth=2, zorder=3)
-                ax_hour.fill_between(hours, counts_h, alpha=0.15, color="steelblue")
+                wd = [wd_map.get(h, 0) for h in hours]
+                we = [we_map.get(h, 0) for h in hours]
+                total = [wd[h] + we[h] for h in hours]
+
+                ax_hour.fill_between(hours, 0, wd, color="#008fd5", alpha=0.8, label="Wochentag")
+                ax_hour.fill_between(hours, wd, total, color="#e05c2a", alpha=0.8, label="Wochenende")
+                ax_hour.plot(hours, total, color="black", linewidth=1, alpha=0.4)
                 ax_hour.set_xticks(range(0, 24, 3))
                 ax_hour.set_xticklabels([f"{h:02d}:00" for h in range(0, 24, 3)])
                 ax_hour.set_title("Flüge nach Uhrzeit")
                 ax_hour.set_ylabel("Flüge")
                 ax_hour.set_xlim(0, 23)
+                ax_hour.legend(fontsize=7, loc="upper left")
 
             fig.tight_layout(pad=1.5)
 
