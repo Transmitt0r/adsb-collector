@@ -10,6 +10,7 @@ WORKDIR /app
 
 # Copy workspace manifests for dependency resolution (cache layer)
 COPY pyproject.toml uv.lock .python-version ./
+COPY collector/pyproject.toml collector/pyproject.toml
 COPY bot/pyproject.toml bot/pyproject.toml
 RUN uv sync --locked --no-dev --no-install-project --package squawk-bot
 
