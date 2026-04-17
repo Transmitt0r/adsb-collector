@@ -101,6 +101,7 @@ squawk/
 
   bot/
     protocols.py             ← Broadcaster protocol
+    app.py                   ← TelegramBot: PTB wiring, command registration, run()
     handlers.py              ← /start /stop /debug Telegram command handlers
     broadcaster.py           ← TelegramBroadcaster (implements Broadcaster)
 
@@ -203,7 +204,7 @@ class EventBus:
 
 **Idempotency requirement:** Because `processed_at` is marked by the actor after
 processing — and a crash between processing and marking causes replay — all actor
-`handle()` implementations must be idempotent. Use upserts, not inserts. Document
+write operations must be idempotent. Use upserts, not inserts. Document
 the idempotency mechanism for each actor in its implementation.
 
 **Event log schema (owned by EventBus, not by any actor):**
@@ -224,6 +225,11 @@ CREATE TABLE event_log (
 CREATE INDEX event_log_unprocessed
     ON event_log (emitted_at)
     WHERE processed_at IS NULL;
+-- Note: partial indexes do not survive TimescaleDB chunk compression. In practice
+-- the 24h replay window only ever touches the latest (uncompressed) chunk, so this
+-- is a non-issue under normal operation. If the service is down for >7 days, the
+-- replay query will skip compressed chunks or trigger decompression — acceptable
+-- since a multi-day outage is already an exceptional case.
 
 SELECT create_hypertable('event_log', 'emitted_at');
 SELECT add_compression_policy('event_log', INTERVAL '7 days');
@@ -262,6 +268,10 @@ class DigestRequested:
     period_start: datetime
     period_end: datetime
     force: bool = False  # if True, DigestActor bypasses the cache check
+
+# Period windows:
+#   Scheduler (weekly):  period_start = now - 7 days, period_end = now
+#   /debug (on-demand):  period_start = now - 24 hours, period_end = now, force = True
 ```
 
 ---
@@ -291,8 +301,10 @@ users                  UserRepository         —
 
 `PollingActor` requires a read on `enriched_aircraft.expires_at` to detect expiry.
 This is resolved by injecting `EnrichmentRepository` into `PollingActor` as a
-read-only dependency. `EnrichmentRepository` exposes `get_expired(hexes) -> list[str]`
-— no write path is available to `PollingActor`.
+read-only dependency. `EnrichmentRepository` exposes
+`get_expired(hexes, ttl) -> list[tuple[str, str | None]]` (hex, callsign pairs) —
+no write path is available to `PollingActor`. Returning the callsign avoids a
+separate per-hex lookup when constructing `EnrichmentExpired` events.
 
 ---
 
@@ -415,15 +427,22 @@ class Scheduler(Protocol):
 `APSchedulerBackend` is the only concrete implementation. Nothing outside
 `scheduler.py` imports APScheduler.
 
-The scheduler emits events onto the bus — it does not call actors directly:
+The scheduler emits events onto the bus — it does not call actors directly.
+APScheduler's `AsyncIOScheduler` supports native async jobs, so the job coroutine
+is awaited directly — no `asyncio.create_task()`, which would escape the TaskGroup
+and silently drop exceptions:
 
 ```python
-scheduler.add_cron_job(
-    lambda: asyncio.create_task(bus.emit(DigestRequested(...))),
-    config.digest_schedule,
-    tz="Europe/Berlin",
-)
+async def _emit_digest() -> None:
+    now = datetime.now(tz=timezone.utc)
+    await bus.emit(DigestRequested(period_start=now - timedelta(days=7), period_end=now))
+
+scheduler.add_cron_job(_emit_digest, config.digest_schedule, tz="Europe/Berlin")
 ```
+
+If `bus.emit()` fails (e.g., DB temporarily unavailable), the exception surfaces in
+APScheduler's job executor logs and the digest is skipped until the next scheduled
+run. This is acceptable — a missed weekly digest is recoverable via `/debug`.
 
 ---
 
@@ -453,11 +472,15 @@ class PollingActor:
         1. On startup: call sightings.close_open_sightings() (crash recovery).
         2. Poll tar1090 every poll_interval seconds.
         3. Call sightings.record_poll(states, session_timeout) →
-               returns NewSighting list (hex + callsign, for first-ever sightings)
+               returns list[NewSighting] (hex + callsign) for first-ever sightings.
+               Stateless: queries sightings WHERE ended_at IS NULL on every call.
+               No in-memory session state.
         4. Call enrichment.get_expired(all_current_hexes, ttl) →
-               returns list of hex codes whose enrichment has expired
+               returns list[tuple[str, str | None]] (hex, callsign) for aircraft
+               whose enrichment has expired. Callsign included to avoid a second
+               round-trip when constructing EnrichmentExpired events.
         5. Emit HexFirstSeen for each new sighting.
-        6. Emit EnrichmentExpired for each expired hex.
+        6. Emit EnrichmentExpired for each expired (hex, callsign) pair.
         7. On shutdown: call sightings.close_open_sightings().
         """
 ```
@@ -490,8 +513,10 @@ class EnrichmentActor:
         1. Collect events from inbox until batch_size reached OR flush_interval elapses.
         2. For each event: fetch AircraftInfo + RouteInfo via clients.
         3. Call scoring_client.score_batch(all fetched data) → one Gemini call.
-        4. Store each result via enrichment.store(hex, result, expires_at).
-           store() uses upsert — idempotent on replay.
+        4. Store each result via enrichment.store(hex, score, route, expires_at).
+           store() writes both enriched_aircraft (upsert on hex) and
+           callsign_routes (upsert on callsign) in one call — both owned by
+           EnrichmentRepository. Both upserts are idempotent on replay.
         5. Mark each event's processed_at in event_log.
         6. Loop.
         """
@@ -602,12 +627,14 @@ async def main() -> None:
         bus.subscribe(DigestRequested,   digest_actor)
 
         # Scheduler (fires events onto bus, no actor coupling)
+        async def _emit_digest() -> None:
+            now = datetime.now(tz=timezone.utc)
+            await bus.emit(DigestRequested(
+                period_start=now - timedelta(days=7), period_end=now
+            ))
+
         scheduler = APSchedulerBackend()
-        scheduler.add_cron_job(
-            lambda: asyncio.create_task(bus.emit(DigestRequested(...))),
-            config.digest_schedule,
-            tz="Europe/Berlin",
-        )
+        scheduler.add_cron_job(_emit_digest, config.digest_schedule, tz="Europe/Berlin")
         scheduler.start()
 
         # Telegram bot
@@ -623,11 +650,34 @@ async def main() -> None:
             tg.create_task(bot.run())
 ```
 
+**TelegramBot** lives in `squawk/bot/app.py`. It wraps PTB's low-level API to run
+under an existing asyncio loop:
+
+```python
+class TelegramBot:
+    def __init__(self, token: str, users: UserRepository, bus: EventBus) -> None: ...
+
+    async def run(self) -> None:
+        """
+        Uses Application.initialize() / Application.start() / Updater.start_polling()
+        rather than run_polling(), which manages its own event loop.
+        Registers handlers from bot/handlers.py.
+        Runs until cancelled.
+        """
+```
+
 **Note on python-telegram-bot + asyncio.TaskGroup:** PTB's `run_polling()` manages
 its own event loop. Running it under an existing `TaskGroup` requires using the
 lower-level `Application.initialize()` / `Application.start()` / `Updater.start_polling()`
-API. This must be validated in a proof-of-concept (task 1.11) before Phase 7, not
+API. This must be validated in a proof-of-concept (task 1.2) before Phase 7, not
 during it.
+
+**Graceful degradation:** the event-driven design naturally handles temporary
+unavailability of the DB or feeder. If the DB is down, `bus.emit()` fails and the
+polling loop logs and retries on the next tick — no crash. If the feeder is
+unreachable, `tar1090.poll()` returns an empty list and the loop continues. Actors
+catch exceptions in their drain loops and continue — a failed enrichment batch is
+retried on the next flush. No component failure cascades to a full process crash.
 
 ---
 
@@ -774,7 +824,9 @@ fully recoverable by re-running enrichment after cutover.
    remain untouched)
 3. Drop enrichment columns from `aircraft` (`registration`, `type`, `operator`,
    `flag`, `fetched_at`, `story_score`, `story_tags`, `lm_annotation`, `enriched_at`)
-4. Drop `digests` content or leave as-is (schema-compatible, old content ignored)
+4. Truncate `digests` table — old rows are JSON blobs from the old Pydantic model
+   and will fail deserialisation into the new `DigestOutput`. Truncate is safe:
+   digest content is regenerated on the next Sunday or via `/debug`.
 5. Start `squawk` service — enrichment backfill begins automatically via
    `HexFirstSeen` replay or enrichment TTL expiry on first poll cycle
 
@@ -861,8 +913,9 @@ passing before the next phase begins.
       `record_poll(states, session_timeout) -> list[NewSighting]`,
       `close_open_sightings()`. Owns: `aircraft`, `sightings`, `position_updates`
 - [ ] **6.2** Write `squawk/repositories/enrichment.py`: `EnrichmentRepository`
-      with `store(hex, result, expires_at)` (upsert — idempotent),
-      `get_expired(hexes, ttl) -> list[str]`, `get_callsign(hex) -> str | None`.
+      with `store(hex, score, route, expires_at)` (upserts both `enriched_aircraft`
+      and `callsign_routes` — idempotent),
+      `get_expired(hexes, ttl) -> list[tuple[str, str | None]]` (hex + callsign).
       Owns: `enriched_aircraft`, `callsign_routes`
 - [ ] **6.3** Write `squawk/repositories/digest.py`: `DigestRepository` with
       `get_cached(period_start, period_end) -> DigestOutput | None`,
@@ -881,14 +934,16 @@ passing before the next phase begins.
 - [ ] **7.1** Write `squawk/bot/protocols.py`: `Broadcaster` protocol
 - [ ] **7.2** Write `squawk/bot/broadcaster.py`: `TelegramBroadcaster`
 - [ ] **7.3** Write `squawk/bot/handlers.py`: `/start`, `/stop`, `/debug` handlers;
-      `/debug` emits `DigestRequested(force=True)` onto the bus
-- [ ] **7.4** Write `squawk/actors/polling.py`: `PollingActor` as documented;
+      `/debug` emits `DigestRequested(period_start=now-24h, period_end=now, force=True)`
+- [ ] **7.4** Write `squawk/bot/app.py`: `TelegramBot` using low-level PTB API
+      validated in task 1.2
+- [ ] **7.5** Write `squawk/actors/polling.py`: `PollingActor` as documented;
       crash recovery via `close_open_sightings()` on startup and shutdown
-- [ ] **7.5** Write `squawk/actors/enrichment.py`: `EnrichmentActor` with inbox,
+- [ ] **7.6** Write `squawk/actors/enrichment.py`: `EnrichmentActor` with inbox,
       batch collect loop, idempotent upsert via `EnrichmentRepository.store()`
-- [ ] **7.6** Write `squawk/actors/digest.py`: `DigestActor` with inbox, `force`
+- [ ] **7.7** Write `squawk/actors/digest.py`: `DigestActor` with inbox, `force`
       bypass of cache check
-- [ ] **7.7** Write actor tests with fake bus, fake repositories, fake clients
+- [ ] **7.8** Write actor tests with fake bus, fake repositories, fake clients
 
 ### Phase 8 — Wiring & Deployment
 
@@ -926,6 +981,7 @@ should be rejected.
 5. **`libs/tar1090` and `libs/eventbus` have zero knowledge of squawk domain
    types.** Enforced by ruff banned-import rules in CI — not convention alone.
 6. **`__main__.py` contains wiring only.** No business logic.
-7. **All actor `handle()` implementations are idempotent.** Replay is guaranteed
-   to happen; double-processing must produce the same result as single processing.
-   Document the idempotency mechanism (upsert key, dedup condition) in each actor.
+7. **All actor write operations are idempotent.** Replay is guaranteed to happen;
+   double-processing must produce the same result as single processing. Document
+   the idempotency mechanism (upsert key, dedup condition) in each actor's
+   implementation.
