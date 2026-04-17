@@ -5,7 +5,7 @@
 - Single deployable service instead of two (`collector` + `bot` → `squawk`)
 - Stateless: restart or redeploy at any time without data loss
 - Clear, enforced table ownership — no two actors write to the same table
-- All inter-actor communication goes through the event bus — no shared repositories
+- All inter-actor communication goes through the event bus — no shared write repositories
 - Typed, protocol-based boundaries everywhere: easy to test, easy to reason about
 - Auditable: every state change is a logged event
 - Observable: data flow is visible and graspable from `__main__.py` alone
@@ -49,8 +49,8 @@ any actor. `DigestRequested` lands on the bus the same way `HexFirstSeen` does.
 ## Repository Layout
 
 One `pyproject.toml` at the repo root covers the entire project. `libs/` packages
-are part of the same project — the boundary is enforced by import discipline, not
-package isolation.
+are part of the same project — the boundary is enforced by import discipline and
+CI-checked banned-import rules (see Invariants).
 
 ```
 pyproject.toml               ← single, all dependencies live here
@@ -65,10 +65,10 @@ libs/
     _http.py                 ← aiohttp internals (private)
 
   eventbus/                  ← pure package: typed async event bus, no domain knowledge
-    __init__.py              ← public API: EventBus, Handler protocol
-    bus.py                   ← dispatcher + asyncio delivery
+    __init__.py              ← public API: EventBus, Actor protocol
+    bus.py                   ← dispatcher: writes to event_log, delivers to actor inboxes
     log.py                   ← TimescaleDB-backed event log
-    protocols.py             ← Handler protocol
+    protocols.py             ← Actor protocol
 
 squawk/
   __init__.py
@@ -78,11 +78,12 @@ squawk/
   events.py                  ← domain event dataclasses
   scheduler.py               ← Scheduler protocol + APSchedulerBackend
 
-  clients/                   ← typed HTTP clients, each behind a Protocol
-    protocols.py             ← AircraftLookupClient, PhotoClient, RouteClient
+  clients/                   ← typed HTTP clients + AI clients, each behind a Protocol
+    protocols.py             ← AircraftLookupClient, PhotoClient, RouteClient, ScoringClient
     adsbdb.py                ← AdsbbClient (implements AircraftLookupClient)
     planespotters.py         ← PlanespottersClient (implements PhotoClient)
     routes.py                ← RoutesClient (implements RouteClient)
+    gemini.py                ← GeminiClient (implements ScoringClient and DigestClient)
 
   repositories/              ← write repositories, one per table-owner
     sightings.py             ← SightingRepository (aircraft, sightings, position_updates)
@@ -99,8 +100,9 @@ squawk/
     digest.py                ← DigestActor
 
   bot/
+    protocols.py             ← Broadcaster protocol
     handlers.py              ← /start /stop /debug Telegram command handlers
-    broadcaster.py           ← sends digest to all active users
+    broadcaster.py           ← TelegramBroadcaster (implements Broadcaster)
 
 tests/
   libs/
@@ -117,9 +119,8 @@ tests/
 ## Libraries
 
 `libs/tar1090` and `libs/eventbus` are Python packages within the single project.
-They have no dependency on `squawk` domain types. This is enforced by convention:
-nothing inside `libs/` may import from `squawk/`. Checked in code review and by
-keeping their internal `import` statements visibly clean.
+Nothing inside `libs/` may import from `squawk/`. Enforced by ruff banned-import
+rules in CI (see Invariants).
 
 ### `libs/tar1090`
 
@@ -156,44 +157,81 @@ Nothing else is public. Internal HTTP logic lives in `_http.py`.
 Pure asyncio library. No domain knowledge. No database schema opinions beyond
 what is needed to persist and replay events.
 
-**Public API:**
+**Actor contract:**
+
+Each squawk actor implements the `Actor` protocol. The bus delivers events by
+putting them into the actor's `inbox` — a non-blocking `asyncio.Queue`. The actor's
+`run()` method drains the inbox independently.
 
 ```python
-# eventbus/__init__.py
+# eventbus/protocols.py
 
-class Handler(Protocol[E]):
-    async def handle(self, events: list[E]) -> None: ...
+class Actor(Protocol[E]):
+    @property
+    def inbox(self) -> asyncio.Queue[E]: ...
+
+    async def run(self) -> None:
+        """Long-running task. Drains inbox, processes batches, marks events processed."""
+```
+
+**EventBus delivery model:**
+
+```python
+# eventbus/bus.py
 
 class EventBus:
     def __init__(self, pool: asyncpg.Pool) -> None: ...
 
-    def subscribe(self, event_type: type[E], handler: Handler[E]) -> None: ...
+    def subscribe(self, event_type: type[E], actor: Actor[E]) -> None: ...
 
     async def emit(self, event: DomainEvent) -> None:
-        """Write to event_log, deliver to subscribed handlers."""
+        """
+        1. Write event to event_log (processed_at = NULL).
+        2. Put event into each subscribed actor's inbox (non-blocking).
+        emit() returns immediately — it does NOT await the actor.
+        processed_at is marked by the actor after it completes processing,
+        not when the event is delivered.
+        """
 
     async def replay_unprocessed(self, since: timedelta = timedelta(hours=24)) -> None:
-        """On startup: re-deliver events with processed_at IS NULL within window."""
+        """
+        On startup: fetch event_log WHERE processed_at IS NULL AND emitted_at > now()-since.
+        Put each event into the appropriate actor's inbox.
+        The 24h window prevents replaying stale events after a long outage.
+        """
 ```
+
+**Idempotency requirement:** Because `processed_at` is marked by the actor after
+processing — and a crash between processing and marking causes replay — all actor
+`handle()` implementations must be idempotent. Use upserts, not inserts. Document
+the idempotency mechanism for each actor in its implementation.
 
 **Event log schema (owned by EventBus, not by any actor):**
 
 ```sql
 -- OWNER: EventBus
 CREATE TABLE event_log (
-    id           BIGSERIAL,
+    id           BIGSERIAL    NOT NULL,
     type         TEXT         NOT NULL,
     payload      JSONB        NOT NULL,
     emitted_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
     processed_at TIMESTAMPTZ,
 
-    PRIMARY KEY (id, emitted_at)  -- composite for hypertable
+    PRIMARY KEY (id, emitted_at)  -- composite required for hypertable
 );
+
+-- Partial index: startup replay query must not scan all chunks
+CREATE INDEX event_log_unprocessed
+    ON event_log (emitted_at)
+    WHERE processed_at IS NULL;
 
 SELECT create_hypertable('event_log', 'emitted_at');
 SELECT add_compression_policy('event_log', INTERVAL '7 days');
 SELECT add_retention_policy('event_log', INTERVAL '90 days');
 ```
+
+Note: `mark_processed()` must supply both `id` and `emitted_at` to hit the
+composite primary key — do not query by `id` alone on a hypertable.
 
 ---
 
@@ -220,43 +258,54 @@ class EnrichmentExpired:
 
 @dataclass(frozen=True)
 class DigestRequested:
-    """Emitted by Scheduler on cron schedule."""
+    """Emitted by Scheduler on cron schedule, or by /debug command handler."""
     period_start: datetime
     period_end: datetime
-
-DomainEvent = HexFirstSeen | EnrichmentExpired | DigestRequested
+    force: bool = False  # if True, DigestActor bypasses the cache check
 ```
 
 ---
 
 ## Table Ownership
 
-**Enforced structurally:** each actor receives only its own write repository via
-constructor injection. An actor that tries to write to a table it does not own
-has no repository to do so with — it is a wiring error visible in `__main__.py`.
+**Rule — writes:** each actor receives only its own write repository via constructor
+injection. An actor that tries to write to a table it does not own has no repository
+to do so with.
+
+**Rule — reads:** read-only access across ownership boundaries is permitted when
+injected explicitly and clearly named (e.g., `EnrichmentRepository.get_expired()`
+passed to `PollingActor`). `DigestQuery` is the canonical example.
 
 ```
-Table                  Owner (write)          Accessed by (read)
-─────────────────────────────────────────────────────────────────────
-aircraft               SightingRepository     DigestQuery (read)
-sightings              SightingRepository     DigestQuery (read)
+Table                  Owner (write)          Read access
+──────────────────────────────────────────────────────────────────────────
+aircraft               SightingRepository     DigestQuery
+sightings              SightingRepository     DigestQuery
 position_updates       SightingRepository     —
-enriched_aircraft      EnrichmentRepository   DigestQuery (read)
-callsign_routes        EnrichmentRepository   DigestQuery (read)
+enriched_aircraft      EnrichmentRepository   DigestQuery, PollingActor (expiry check only)
+callsign_routes        EnrichmentRepository   DigestQuery
 event_log              EventBus               —
 digests                DigestRepository       —
 users                  UserRepository         —
 ```
 
-Read access for digest generation goes through `DigestQuery` (read-only query
-service, no write methods). It may join any table. It is not a repository.
+`PollingActor` requires a read on `enriched_aircraft.expires_at` to detect expiry.
+This is resolved by injecting `EnrichmentRepository` into `PollingActor` as a
+read-only dependency. `EnrichmentRepository` exposes `get_expired(hexes) -> list[str]`
+— no write path is available to `PollingActor`.
 
 ---
 
 ## External Service Clients
 
-All external HTTP calls go through typed clients. No `requests.get()` or
-`aiohttp.ClientSession.get()` anywhere outside `squawk/clients/`.
+All external HTTP and AI calls go through typed clients. No `requests.get()`,
+`aiohttp.ClientSession.get()`, or direct SDK calls anywhere outside `squawk/clients/`.
+
+**Retry policy (applies to all clients):**
+- `404` → return `None` (not an error)
+- `429` → exponential backoff, up to `max_retries` (configurable, default 3)
+- `5xx` → retry up to `max_retries` with backoff
+- Other errors → raise immediately
 
 **Protocols:**
 
@@ -273,9 +322,11 @@ class AircraftInfo:
 @dataclass(frozen=True)
 class RouteInfo:
     origin_iata: str | None
+    origin_icao: str | None
     origin_city: str | None
     origin_country: str | None
     dest_iata: str | None
+    dest_icao: str | None
     dest_city: str | None
     dest_country: str | None
 
@@ -283,6 +334,18 @@ class RouteInfo:
 class PhotoInfo:
     url: str
     caption: str
+
+@dataclass(frozen=True)
+class ScoreResult:
+    score: int           # 1–10
+    tags: list[str]
+    annotation: str      # one German sentence; empty string if unremarkable
+
+@dataclass(frozen=True)
+class DigestOutput:
+    text: str
+    photo_url: str | None = None
+    photo_caption: str | None = None
 
 class AircraftLookupClient(Protocol):
     async def lookup(self, hex: str) -> AircraftInfo | None: ...
@@ -292,11 +355,40 @@ class RouteClient(Protocol):
 
 class PhotoClient(Protocol):
     async def lookup(self, hex: str) -> PhotoInfo | None: ...
+
+class ScoringClient(Protocol):
+    async def score_batch(
+        self,
+        aircraft: list[tuple[str, AircraftInfo | None, RouteInfo | None]],
+        # each tuple: (hex, aircraft_info, route_info)
+    ) -> list[ScoreResult]: ...
+
+class DigestClient(Protocol):
+    async def generate(
+        self,
+        candidates: list[dict],
+        stats: dict,
+        photos: dict[str, PhotoInfo],
+    ) -> DigestOutput: ...
 ```
 
-Each concrete client (`AdsbbClient`, `RoutesClient`, `PlanespottersClient`) takes
-an `aiohttp.ClientSession` and a base URL. Returns `None` on not-found. Raises on
-unrecoverable errors.
+`GeminiClient` implements both `ScoringClient` and `DigestClient`. A fake
+implementation of each protocol is used in actor unit tests.
+
+---
+
+## Broadcaster
+
+```python
+# squawk/bot/protocols.py
+
+class Broadcaster(Protocol):
+    async def broadcast(self, digest: DigestOutput) -> None:
+        """Send digest to all active users."""
+```
+
+`TelegramBroadcaster` is the only concrete implementation. `DigestActor` receives
+a `Broadcaster` — it does not import Telegram.
 
 ---
 
@@ -316,12 +408,6 @@ class Scheduler(Protocol):
         tz: str = "UTC",
     ) -> None: ...
 
-    def add_interval_job(
-        self,
-        func: Callable[[], Coroutine[Any, Any, None]],
-        seconds: int,
-    ) -> None: ...
-
     def start(self) -> None: ...
     def shutdown(self) -> None: ...
 ```
@@ -329,12 +415,11 @@ class Scheduler(Protocol):
 `APSchedulerBackend` is the only concrete implementation. Nothing outside
 `scheduler.py` imports APScheduler.
 
-The scheduler emits events, it does not call actors directly:
+The scheduler emits events onto the bus — it does not call actors directly:
 
 ```python
-# inside APSchedulerBackend setup
 scheduler.add_cron_job(
-    lambda: bus.emit(DigestRequested(period_start=..., period_end=...)),
+    lambda: asyncio.create_task(bus.emit(DigestRequested(...))),
     config.digest_schedule,
     tz="Europe/Berlin",
 )
@@ -344,9 +429,9 @@ scheduler.add_cron_job(
 
 ## Actors
 
-Each actor has exactly one `async def run(self) -> None` method. It runs until
-cancelled. Constructor receives only what it needs — never another actor's
-repository.
+Each actor has exactly one `async def run(self) -> None` method and an `inbox:
+asyncio.Queue`. The bus puts events into the inbox; `run()` drains it. Constructor
+receives only what it needs — never another actor's write repository.
 
 ### PollingActor
 
@@ -356,22 +441,30 @@ class PollingActor:
         self,
         poll_url: str,
         poll_interval: float,
+        session_timeout: float,        # seconds; passed to SightingRepository
         sightings: SightingRepository,
+        enrichment: EnrichmentRepository,  # read-only: get_expired() only
         bus: EventBus,
         enrichment_ttl: timedelta,
     ) -> None: ...
 
     async def run(self) -> None:
-        """Poll every poll_interval seconds.
-        - Record all observed aircraft via SightingRepository
-        - Emit HexFirstSeen for aircraft never seen before
-        - Emit EnrichmentExpired for aircraft whose enriched_aircraft.expires_at < now()
+        """
+        1. On startup: call sightings.close_open_sightings() (crash recovery).
+        2. Poll tar1090 every poll_interval seconds.
+        3. Call sightings.record_poll(states, session_timeout) →
+               returns NewSighting list (hex + callsign, for first-ever sightings)
+        4. Call enrichment.get_expired(all_current_hexes, ttl) →
+               returns list of hex codes whose enrichment has expired
+        5. Emit HexFirstSeen for each new sighting.
+        6. Emit EnrichmentExpired for each expired hex.
+        7. On shutdown: call sightings.close_open_sightings().
         """
 ```
 
-`SightingRepository.record_poll()` returns two lists: `new_hexes` and
-`expired_hexes`. PollingActor turns these into events and emits them. It does not
-know EnrichmentActor exists.
+`record_poll()` returns `list[NewSighting]` (a typed dataclass with `hex` and
+`callsign`) — not a bare `list[str]` — so `PollingActor` can populate the
+`callsign` field of `HexFirstSeen` without a second DB query.
 
 ### EnrichmentActor
 
@@ -382,22 +475,32 @@ class EnrichmentActor:
         enrichment: EnrichmentRepository,
         aircraft_client: AircraftLookupClient,
         route_client: RouteClient,
-        gemini_api_key: str,
+        scoring_client: ScoringClient,
+        enrichment_ttl: timedelta,
         batch_size: int,
         flush_interval: float,
-        enrichment_ttl: timedelta,
     ) -> None: ...
 
-    async def handle(self, events: list[HexFirstSeen | EnrichmentExpired]) -> None:
-        """Collect events, batch-score with one Gemini call, store results."""
+    @property
+    def inbox(self) -> asyncio.Queue[HexFirstSeen | EnrichmentExpired]: ...
 
     async def run(self) -> None:
-        """Drain inbox: collect up to batch_size events or flush_interval seconds,
-        whichever comes first. Then process batch."""
+        """
+        Drain loop:
+        1. Collect events from inbox until batch_size reached OR flush_interval elapses.
+        2. For each event: fetch AircraftInfo + RouteInfo via clients.
+        3. Call scoring_client.score_batch(all fetched data) → one Gemini call.
+        4. Store each result via enrichment.store(hex, result, expires_at).
+           store() uses upsert — idempotent on replay.
+        5. Mark each event's processed_at in event_log.
+        6. Loop.
+        """
 ```
 
-One Gemini call per batch. The scoring prompt receives all aircraft data at once
-and returns a JSON array of `ScoreResult`. No per-aircraft agent instantiation.
+One Gemini call per batch. **Validation required** (see Phase 1 checklist): confirm
+Gemini reliably returns a valid JSON array with one entry per input aircraft before
+committing to this design. Include a fallback: if the array length doesn't match
+input length, fall back to per-aircraft calls for that batch.
 
 ### DigestActor
 
@@ -408,26 +511,36 @@ class DigestActor:
         query: DigestQuery,
         digest_repo: DigestRepository,
         photo_client: PhotoClient,
+        digest_client: DigestClient,
         broadcaster: Broadcaster,
-        gemini_api_key: str,
     ) -> None: ...
 
-    async def handle(self, events: list[DigestRequested]) -> None:
-        """For each DigestRequested:
-        - Check digest cache (DigestRepository); skip if already generated for period
-        - Query enriched candidates + stats via DigestQuery
-        - Call Gemini to generate digest text
-        - Cache result via DigestRepository
-        - Broadcast to all active users via Broadcaster
+    @property
+    def inbox(self) -> asyncio.Queue[DigestRequested]: ...
+
+    async def run(self) -> None:
+        """
+        Drain loop:
+        1. Wait for DigestRequested event from inbox.
+        2. If event.force is False: check digest_repo.get_cached(period) — skip if exists.
+        3. Fetch candidates + stats via DigestQuery.
+        4. Fetch photos for top candidates via photo_client.
+        5. Call digest_client.generate(candidates, stats, photos) → DigestOutput.
+        6. Cache via digest_repo.cache(period, digest).
+        7. Call broadcaster.broadcast(digest).
+        8. Mark event processed_at.
         """
 ```
+
+`/debug` sets `force=True` on `DigestRequested` — DigestActor bypasses the cache
+check and always generates a fresh digest.
 
 ---
 
 ## Main Wiring
 
-`__main__.py` is the only place where concrete types are assembled. Reading it
-gives a complete picture of the system.
+`__main__.py` is the only place where concrete types are assembled. Reading it gives
+a complete picture of the system.
 
 ```python
 async def main() -> None:
@@ -443,11 +556,15 @@ async def main() -> None:
     # Read query
     digest_query = DigestQuery(pool)
 
-    # External clients
     async with aiohttp.ClientSession() as http:
+        # External clients
         aircraft_client = AdsbbClient(http, config.adsbdb_url)
         route_client    = RoutesClient(http, config.routes_url)
         photo_client    = PlanespottersClient(http, config.planespotters_url)
+        gemini          = GeminiClient(config.gemini_api_key)
+
+        # Broadcaster
+        broadcaster = TelegramBroadcaster(user_repo, config.bot_token)
 
         # Event bus
         bus = EventBus(pool)
@@ -456,7 +573,9 @@ async def main() -> None:
         polling_actor = PollingActor(
             poll_url=config.adsb_url,
             poll_interval=config.poll_interval,
+            session_timeout=config.session_timeout,
             sightings=sightings_repo,
+            enrichment=enrichment_repo,
             bus=bus,
             enrichment_ttl=config.enrichment_ttl,
         )
@@ -464,45 +583,51 @@ async def main() -> None:
             enrichment=enrichment_repo,
             aircraft_client=aircraft_client,
             route_client=route_client,
-            gemini_api_key=config.gemini_api_key,
+            scoring_client=gemini,
+            enrichment_ttl=config.enrichment_ttl,
             batch_size=config.enrichment_batch_size,
             flush_interval=config.enrichment_flush_interval,
-            enrichment_ttl=config.enrichment_ttl,
         )
-        broadcaster = Broadcaster(user_repo, config.bot_token)
         digest_actor = DigestActor(
             query=digest_query,
             digest_repo=digest_repo,
             photo_client=photo_client,
+            digest_client=gemini,
             broadcaster=broadcaster,
-            gemini_api_key=config.gemini_api_key,
         )
 
         # Bus subscriptions
-        bus.subscribe(HexFirstSeen,       enrichment_actor)
-        bus.subscribe(EnrichmentExpired,  enrichment_actor)
-        bus.subscribe(DigestRequested,    digest_actor)
+        bus.subscribe(HexFirstSeen,      enrichment_actor)
+        bus.subscribe(EnrichmentExpired, enrichment_actor)
+        bus.subscribe(DigestRequested,   digest_actor)
 
         # Scheduler (fires events onto bus, no actor coupling)
         scheduler = APSchedulerBackend()
         scheduler.add_cron_job(
-            lambda: bus.emit(DigestRequested(...)),
+            lambda: asyncio.create_task(bus.emit(DigestRequested(...))),
             config.digest_schedule,
             tz="Europe/Berlin",
         )
         scheduler.start()
 
-        # Telegram bot (independent, reads from user_repo only)
+        # Telegram bot
         bot = TelegramBot(config.bot_token, user_repo, bus)
 
-        # Startup: replay any unprocessed events from last 24h
-        await bus.replay_unprocessed()
+        # Startup: replay unprocessed events from last 24h
+        await bus.replay_unprocessed(since=timedelta(hours=24))
 
         async with asyncio.TaskGroup() as tg:
             tg.create_task(polling_actor.run())
             tg.create_task(enrichment_actor.run())
+            tg.create_task(digest_actor.run())
             tg.create_task(bot.run())
 ```
+
+**Note on python-telegram-bot + asyncio.TaskGroup:** PTB's `run_polling()` manages
+its own event loop. Running it under an existing `TaskGroup` requires using the
+lower-level `Application.initialize()` / `Application.start()` / `Updater.start_polling()`
+API. This must be validated in a proof-of-concept (task 1.11) before Phase 7, not
+during it.
 
 ---
 
@@ -518,7 +643,7 @@ CREATE TABLE aircraft (
 );
 
 CREATE TABLE sightings (
-    id           BIGSERIAL   PRIMARY KEY,
+    id           BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     hex          TEXT        NOT NULL REFERENCES aircraft(hex),
     callsign     TEXT,
     started_at   TIMESTAMPTZ NOT NULL,
@@ -528,6 +653,9 @@ CREATE TABLE sightings (
     min_distance FLOAT,
     max_distance FLOAT
 );
+-- sightings grows unboundedly; apply retention via TimescaleDB hypertable
+SELECT create_hypertable('sightings', 'started_at');
+SELECT add_retention_policy('sightings', INTERVAL '2 years');
 
 CREATE TABLE position_updates (
     time     TIMESTAMPTZ NOT NULL,
@@ -561,9 +689,11 @@ CREATE TABLE enriched_aircraft (
 CREATE TABLE callsign_routes (
     callsign        TEXT        PRIMARY KEY,
     origin_iata     TEXT,
+    origin_icao     TEXT,
     origin_city     TEXT,
     origin_country  TEXT,
     dest_iata       TEXT,
+    dest_icao       TEXT,
     dest_city       TEXT,
     dest_country    TEXT,
     fetched_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -571,20 +701,25 @@ CREATE TABLE callsign_routes (
 
 -- OWNER: EventBus
 CREATE TABLE event_log (
-    id           BIGSERIAL,
-    type         TEXT        NOT NULL,
-    payload      JSONB       NOT NULL,
-    emitted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    id           BIGSERIAL    NOT NULL,
+    type         TEXT         NOT NULL,
+    payload      JSONB        NOT NULL,
+    emitted_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
     processed_at TIMESTAMPTZ,
     PRIMARY KEY (id, emitted_at)
 );
+
+CREATE INDEX event_log_unprocessed
+    ON event_log (emitted_at)
+    WHERE processed_at IS NULL;
+
 SELECT create_hypertable('event_log', 'emitted_at');
 SELECT add_compression_policy('event_log', INTERVAL '7 days');
 SELECT add_retention_policy('event_log', INTERVAL '90 days');
 
 -- OWNER: DigestRepository (written by DigestActor)
 CREATE TABLE digests (
-    id           SERIAL      PRIMARY KEY,
+    id           BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     period_start TIMESTAMPTZ NOT NULL,
     period_end   TIMESTAMPTZ NOT NULL,
     content      TEXT        NOT NULL,
@@ -604,7 +739,7 @@ CREATE TABLE users (
 
 ## Configuration
 
-All environment variables in one `Config` dataclass. New variables needed:
+All environment variables in one frozen `Config` dataclass:
 
 | Variable                  | Default       | Description                                |
 |---------------------------|---------------|--------------------------------------------|
@@ -613,12 +748,13 @@ All environment variables in one `Config` dataclass. New variables needed:
 | `BOT_TOKEN`               | —             | Telegram bot token                         |
 | `GEMINI_API_KEY`          | —             | Google Gemini API key                      |
 | `ADMIN_CHAT_ID`           | —             | Telegram chat ID for /debug                |
-| `POLL_INTERVAL`           | `5`           | Seconds between collector polls            |
-| `SESSION_TIMEOUT`         | `300`         | Seconds before a sighting session closes   |
+| `POLL_INTERVAL`           | `5`           | Seconds between tar1090 polls              |
+| `SESSION_TIMEOUT`         | `300`         | Seconds of silence before sighting closes  |
 | `DIGEST_SCHEDULE`         | `0 8 * * 0`   | Cron schedule for weekly digest            |
 | `ENRICHMENT_TTL_DAYS`     | `30`          | Days before re-enriching a known aircraft  |
 | `ENRICHMENT_BATCH_SIZE`   | `20`          | Max aircraft per Gemini scoring call       |
 | `ENRICHMENT_FLUSH_SECS`   | `30`          | Max seconds to wait before flushing batch  |
+| `CLIENT_MAX_RETRIES`      | `3`           | Max retries for 429/5xx from external APIs |
 | `ADSBDB_URL`              | (public API)  | adsbdb base URL                            |
 | `PLANESPOTTERS_URL`       | (public API)  | Planespotters base URL                     |
 | `ROUTES_URL`              | (public API)  | Route lookup base URL                      |
@@ -627,94 +763,150 @@ All environment variables in one `Config` dataclass. New variables needed:
 
 ## Migration Plan
 
-The existing `bot/` and `collector/` services will be replaced. The database is
-shared and must be migrated in place.
+There is a single production instance. The migration is a hard cutover — no
+parallel run. The only irreplaceable data is what came out of tar1090: `aircraft`,
+`sightings`, `position_updates`. Enriched data (scores, annotations, routes) is
+fully recoverable by re-running enrichment after cutover.
 
-**Data migration (one-time):**
-1. Copy enrichment columns from `aircraft` → new `enriched_aircraft` table
-2. Set `expires_at = enriched_at + INTERVAL '30 days'` for migrated rows
-3. Drop enrichment columns from `aircraft`
+**Cutover steps:**
+1. Stop `collector` and `bot` services
+2. Apply new schema (new tables; existing `aircraft`, `sightings`, `position_updates`
+   remain untouched)
+3. Drop enrichment columns from `aircraft` (`registration`, `type`, `operator`,
+   `flag`, `fetched_at`, `story_score`, `story_tags`, `lm_annotation`, `enriched_at`)
+4. Drop `digests` content or leave as-is (schema-compatible, old content ignored)
+5. Start `squawk` service — enrichment backfill begins automatically via
+   `HexFirstSeen` replay or enrichment TTL expiry on first poll cycle
 
-**Service migration:**
-1. Deploy `squawk` service
-2. Remove `collector` and `bot` services from `docker-compose.yml`
-3. Remove old `collector/` and `bot/` top-level directories (or archive them)
+**What is lost and acceptable:**
+- Enrichment scores and annotations (re-generated within hours of cutover)
+- Cached digest text (irrelevant; new digest generated on next Sunday)
+- `callsign_routes` (re-fetched during enrichment)
 
 ---
 
 ## Implementation Checklist
 
-Tasks are ordered by dependency. Each task should be completed and tested before
-the next begins.
+Tasks are ordered by dependency. Each task should be completed and its tests
+passing before the next phase begins.
 
-### Phase 1 — Project Restructure & Libraries
+### Phase 1 — Foundations & Validation
 
-- [ ] **1.1** Consolidate to single root `pyproject.toml`: merge all dependencies from `collector/pyproject.toml` and `bot/pyproject.toml`, remove uv workspace config, configure hatchling to include `libs/` and `squawk/` packages
-- [ ] **1.2** Create `libs/tar1090/`: move and strip `collector/` of all DB dependencies (`asyncpg`, `db.py`, `tracker.py`, `schema.sql`, `python-dotenv`)
-- [ ] **1.3** Reduce `tar1090` public API to `poll(url, timeout) -> list[AircraftState]` in `__init__.py`; move HTTP logic to `_http.py`
-- [ ] **1.4** Update `tar1090` tests to only test polling and parsing logic; move to `tests/libs/`
-- [ ] **1.5** Create `libs/eventbus/` package
-- [ ] **1.6** Define `Handler` protocol in `eventbus/protocols.py`
-- [ ] **1.7** Implement `EventBus` in `eventbus/bus.py`: `subscribe()`, `emit()` (in-memory delivery only for now)
-- [ ] **1.8** Implement `EventLog` in `eventbus/log.py`: `write()`, `mark_processed()`, `fetch_unprocessed()`
-- [ ] **1.9** Wire `EventLog` into `EventBus.emit()` and `replay_unprocessed()`
-- [ ] **1.10** Write `eventbus` tests in `tests/libs/`; cover: subscribe/emit, replay on startup, handler error does not crash bus
+- [ ] **1.1** Validate batch Gemini scoring: write a standalone script that sends
+      20 aircraft to Gemini with the proposed batch prompt and asserts the response
+      is a valid JSON array of length 20. Document failure modes. Decide on fallback
+      strategy (per-aircraft retry if array length mismatches).
+- [ ] **1.2** Validate PTB + asyncio.TaskGroup: write a minimal proof-of-concept
+      that runs `python-telegram-bot` alongside a dummy long-running coroutine under
+      `asyncio.TaskGroup` using the low-level PTB API (`initialize` / `start` /
+      `start_polling`). Must confirm graceful shutdown works.
+- [ ] **1.3** Consolidate to single root `pyproject.toml`: merge all dependencies,
+      remove uv workspace config, configure hatchling to include `libs/` and `squawk/`
+      packages, add ruff banned-import rules (`libs/tar1090` and `libs/eventbus` may
+      not import from `squawk`)
+- [ ] **1.4** Create `libs/tar1090/`: strip `collector/` of all DB dependencies
+      (`asyncpg`, `db.py`, `tracker.py`, `schema.sql`, `python-dotenv`); reduce
+      public API to `poll(url, timeout) -> list[AircraftState]`; move HTTP logic
+      to `_http.py`
+- [ ] **1.5** Move and update `tar1090` tests to `tests/libs/test_tar1090.py`
 
-### Phase 2 — Squawk Service Skeleton
+### Phase 2 — Schema
 
-- [ ] **2.1** Create `squawk/` package with `__init__.py`
-- [ ] **2.2** Write `squawk/config.py` with all env vars as a frozen `Config` dataclass
-- [ ] **2.3** Write `squawk/db.py`: `create_pool(database_url) -> asyncpg.Pool`
-- [ ] **2.4** Write `squawk/scheduler.py`: `Scheduler` protocol + `APSchedulerBackend`
-- [ ] **2.5** Write `squawk/events.py`: `HexFirstSeen`, `EnrichmentExpired`, `DigestRequested` frozen dataclasses
+- [ ] **2.1** Write `squawk/schema.sql` with full schema as documented above,
+      including ownership comments, hypertable setup, and partial index on `event_log`
+- [ ] **2.2** Write migration script: drop enrichment columns from `aircraft`;
+      create `enriched_aircraft`, `event_log`, `callsign_routes` (new schema) — no
+      data migration needed for enrichment tables
+- [ ] **2.3** Verify schema applies cleanly against a fresh TimescaleDB instance
 
-### Phase 3 — Schema
+### Phase 3 — EventBus Library
 
-- [ ] **3.1** Write `squawk/schema.sql` with full schema as documented above, including ownership comments
-- [ ] **3.2** Add migration script: copy enrichment data from `aircraft` → `enriched_aircraft`, set `expires_at`, drop old columns
-- [ ] **3.3** Verify schema applies cleanly against a fresh TimescaleDB instance
+- [ ] **3.1** Define `Actor` protocol in `eventbus/protocols.py`
+- [ ] **3.2** Implement `EventLog` in `eventbus/log.py`: `write()`,
+      `mark_processed(id, emitted_at)`, `fetch_unprocessed(since)`
+- [ ] **3.3** Implement `EventBus` in `eventbus/bus.py`: `subscribe()`, `emit()`
+      (write to log + deliver to inbox), `replay_unprocessed()`
+- [ ] **3.4** Write `eventbus` tests in `tests/libs/test_eventbus.py`: subscribe/emit,
+      inbox delivery, replay on startup, handler error does not crash bus,
+      mark_processed uses composite key
 
-### Phase 4 — External Clients
+### Phase 4 — Squawk Skeleton
 
-- [ ] **4.1** Write `squawk/clients/protocols.py`: `AircraftInfo`, `RouteInfo`, `PhotoInfo` dataclasses + `AircraftLookupClient`, `RouteClient`, `PhotoClient` protocols
-- [ ] **4.2** Implement `squawk/clients/adsbdb.py`: `AdsbbClient` using `aiohttp`, returning `AircraftInfo | None`
-- [ ] **4.3** Implement `squawk/clients/routes.py`: `RoutesClient` using `aiohttp`, returning `RouteInfo | None`
-- [ ] **4.4** Implement `squawk/clients/planespotters.py`: `PlanespottersClient` using `aiohttp`, returning `PhotoInfo | None`
-- [ ] **4.5** Write tests for each client with mocked `aiohttp` responses, including 404 and error cases
+- [ ] **4.1** Create `squawk/` package with `__init__.py`
+- [ ] **4.2** Write `squawk/config.py`: frozen `Config` dataclass, all env vars
+- [ ] **4.3** Write `squawk/db.py`: `create_pool(database_url) -> asyncpg.Pool`
+- [ ] **4.4** Write `squawk/scheduler.py`: `Scheduler` protocol + `APSchedulerBackend`
+- [ ] **4.5** Write `squawk/events.py`: `HexFirstSeen`, `EnrichmentExpired`,
+      `DigestRequested` (with `force: bool = False`)
 
-### Phase 5 — Repositories
+### Phase 5 — External Clients
 
-- [ ] **5.1** Write `squawk/repositories/sightings.py`: `SightingRepository` with `record_poll(states) -> tuple[list[str], list[str]]` (returns `new_hexes`, `expired_enrichment_hexes`). Owns: `aircraft`, `sightings`, `position_updates`
-- [ ] **5.2** Write `squawk/repositories/enrichment.py`: `EnrichmentRepository` with `store(hex, result, expires_at)`, `get_callsign(hex) -> str | None`. Owns: `enriched_aircraft`, `callsign_routes`
-- [ ] **5.3** Write `squawk/repositories/digest.py`: `DigestRepository` with `get_cached(period_start, period_end)`, `cache(period_start, period_end, digest)`. Owns: `digests`
-- [ ] **5.4** Write `squawk/repositories/users.py`: `UserRepository` with `register(chat_id, username)`, `unregister(chat_id)`, `get_active() -> list[int]`. Owns: `users`
-- [ ] **5.5** Write `squawk/queries/digest.py`: `DigestQuery` with `get_candidates(days) -> list[DigestCandidate]`, `get_stats(days) -> DigestStats`. Read-only. May join any table.
-- [ ] **5.6** Write repository tests using a real test database (no mocks for DB layer)
+- [ ] **5.1** Write `squawk/clients/protocols.py`: all dataclasses and protocols
+      as documented above (`AircraftInfo`, `RouteInfo`, `PhotoInfo`, `ScoreResult`,
+      `DigestOutput`, `AircraftLookupClient`, `RouteClient`, `PhotoClient`,
+      `ScoringClient`, `DigestClient`)
+- [ ] **5.2** Implement `squawk/clients/adsbdb.py`: `AdsbbClient` with retry policy
+- [ ] **5.3** Implement `squawk/clients/routes.py`: `RoutesClient` with retry policy
+- [ ] **5.4** Implement `squawk/clients/planespotters.py`: `PlanespottersClient`
+      with retry policy
+- [ ] **5.5** Implement `squawk/clients/gemini.py`: `GeminiClient` implementing
+      both `ScoringClient` and `DigestClient`; use batch scoring prompt validated
+      in task 1.1
+- [ ] **5.6** Write client tests with mocked `aiohttp` responses: 200, 404 (→ None),
+      429 (→ retry), 500 (→ retry), exhausted retries (→ raise)
 
-### Phase 6 — Actors
+### Phase 6 — Repositories
 
-- [ ] **6.1** Write `squawk/actors/polling.py`: `PollingActor` — polls via `tar1090.poll()`, calls `SightingRepository.record_poll()`, emits `HexFirstSeen` and `EnrichmentExpired` via `EventBus`
-- [ ] **6.2** Write `squawk/actors/enrichment.py`: `EnrichmentActor` — collects events into batch buffer, flushes on `batch_size` or `flush_interval`, makes single Gemini batch scoring call, stores via `EnrichmentRepository`
-- [ ] **6.3** Update Gemini scoring prompt to accept and return a JSON array (batch input/output)
-- [ ] **6.4** Write `squawk/actors/digest.py`: `DigestActor` — handles `DigestRequested`, checks cache, queries via `DigestQuery`, calls Gemini, caches via `DigestRepository`, broadcasts
-- [ ] **6.5** Write `squawk/bot/broadcaster.py`: `Broadcaster` — sends digest text + optional photo to all active users via `UserRepository` and Telegram API
-- [ ] **6.6** Write `squawk/bot/handlers.py`: `/start`, `/stop`, `/debug` Telegram handlers
-- [ ] **6.7** Write actor tests with fake/mock bus, repositories, and clients
+- [ ] **6.1** Write `squawk/repositories/sightings.py`: `SightingRepository` with
+      `record_poll(states, session_timeout) -> list[NewSighting]`,
+      `close_open_sightings()`. Owns: `aircraft`, `sightings`, `position_updates`
+- [ ] **6.2** Write `squawk/repositories/enrichment.py`: `EnrichmentRepository`
+      with `store(hex, result, expires_at)` (upsert — idempotent),
+      `get_expired(hexes, ttl) -> list[str]`, `get_callsign(hex) -> str | None`.
+      Owns: `enriched_aircraft`, `callsign_routes`
+- [ ] **6.3** Write `squawk/repositories/digest.py`: `DigestRepository` with
+      `get_cached(period_start, period_end) -> DigestOutput | None`,
+      `cache(period_start, period_end, digest)`. Owns: `digests`
+- [ ] **6.4** Write `squawk/repositories/users.py`: `UserRepository` with
+      `register(chat_id, username) -> bool`, `unregister(chat_id) -> bool`,
+      `get_active() -> list[int]`. Owns: `users`
+- [ ] **6.5** Write `squawk/queries/digest.py`: `DigestQuery` with
+      `get_candidates(days) -> list[DigestCandidate]`,
+      `get_stats(days) -> DigestStats`. Read-only. May join any table.
+- [ ] **6.6** Write repository and query tests against a real test database (no
+      mocks for DB layer)
 
-### Phase 7 — Wiring & Deployment
+### Phase 7 — Actors & Bot
 
-- [ ] **7.1** Write `squawk/__main__.py` as documented in the wiring section above
-- [ ] **7.2** Write `Dockerfile` (single, at repo root)
-- [ ] **7.3** Update `docker-compose.yml`: replace `collector` and `bot` services with single `squawk` service
-- [ ] **7.4** Update `CLAUDE.md` to reflect new structure
+- [ ] **7.1** Write `squawk/bot/protocols.py`: `Broadcaster` protocol
+- [ ] **7.2** Write `squawk/bot/broadcaster.py`: `TelegramBroadcaster`
+- [ ] **7.3** Write `squawk/bot/handlers.py`: `/start`, `/stop`, `/debug` handlers;
+      `/debug` emits `DigestRequested(force=True)` onto the bus
+- [ ] **7.4** Write `squawk/actors/polling.py`: `PollingActor` as documented;
+      crash recovery via `close_open_sightings()` on startup and shutdown
+- [ ] **7.5** Write `squawk/actors/enrichment.py`: `EnrichmentActor` with inbox,
+      batch collect loop, idempotent upsert via `EnrichmentRepository.store()`
+- [ ] **7.6** Write `squawk/actors/digest.py`: `DigestActor` with inbox, `force`
+      bypass of cache check
+- [ ] **7.7** Write actor tests with fake bus, fake repositories, fake clients
 
-### Phase 8 — Migration & Cutover
+### Phase 8 — Wiring & Deployment
 
-- [ ] **8.1** Run data migration script against production database (enrichment columns → `enriched_aircraft`)
-- [ ] **8.2** Deploy `squawk` service alongside existing services temporarily to verify event flow
-- [ ] **8.3** Stop and remove `collector` and `bot` services
-- [ ] **8.4** Remove `bot/` directory
-- [ ] **8.5** Archive or remove old `collector/` and replace with `libs/collector/`
+- [ ] **8.1** Write `squawk/__main__.py` as documented in the wiring section above;
+      use low-level PTB API validated in task 1.2
+- [ ] **8.2** Write `Dockerfile` (single, at repo root)
+- [ ] **8.3** Update `docker-compose.yml`: replace `collector` and `bot` with
+      single `squawk` service
+- [ ] **8.4** Smoke test on a local Docker Compose stack against a real TimescaleDB:
+      start service, send `/start`, trigger `/debug`, confirm digest arrives
+
+### Phase 9 — Cutover
+
+- [ ] **9.1** Stop `collector` and `bot` in production
+- [ ] **9.2** Run migration script against production database
+- [ ] **9.3** Deploy `squawk`; confirm polling starts and events appear in `event_log`
+- [ ] **9.4** Update `CLAUDE.md` to reflect new structure
+- [ ] **9.5** Delete `bot/` and `collector/` directories
 
 ---
 
@@ -723,14 +915,17 @@ the next begins.
 These are the rules that keep the system graspable. Any PR that violates them
 should be rejected.
 
-1. **No actor imports another actor's repository.** Cross-actor data flow goes
-   through the event bus only.
-2. **No raw HTTP calls outside `squawk/clients/`.** All external service
-   communication goes through typed clients.
+1. **No actor imports another actor's write repository.** Cross-actor data flow
+   goes through the event bus only. Read-only cross-boundary access is permitted
+   when explicitly injected and named.
+2. **No raw HTTP or AI SDK calls outside `squawk/clients/`.** All external
+   communication goes through typed clients implementing a Protocol.
 3. **No APScheduler imports outside `squawk/scheduler.py`.**
 4. **No database writes outside the owning repository.** See table ownership
    table above.
 5. **`libs/tar1090` and `libs/eventbus` have zero knowledge of squawk domain
-   types.** Nothing inside `libs/` may import from `squawk/`. Enforced by
-   convention and code review, not package isolation.
+   types.** Enforced by ruff banned-import rules in CI — not convention alone.
 6. **`__main__.py` contains wiring only.** No business logic.
+7. **All actor `handle()` implementations are idempotent.** Replay is guaranteed
+   to happen; double-processing must produce the same result as single processing.
+   Document the idempotency mechanism (upsert key, dedup condition) in each actor.
