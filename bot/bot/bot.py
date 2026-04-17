@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 def build_app(config: Config, scheduler) -> Application:
     async def _post_init(app: Application) -> None:
         scheduler.start()
-        logger.info("Scheduler started")
 
     async def _post_stop(app: Application) -> None:
         if scheduler.running:

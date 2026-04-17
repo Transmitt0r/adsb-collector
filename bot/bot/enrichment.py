@@ -94,6 +94,7 @@ async def _score_and_annotate(
 
 async def run_enrichment(config: Config) -> None:
     """Enrich up to 50 unenriched aircraft. Called every 15 minutes by the scheduler."""
+    logger.info("Enrichment job started")
     try:
         rows = get_unenriched_aircraft(config.database_url, limit=50)
     except Exception:
@@ -101,7 +102,7 @@ async def run_enrichment(config: Config) -> None:
         return
 
     if not rows:
-        logger.debug("No aircraft to enrich")
+        logger.info("No aircraft to enrich")
         return
 
     logger.info("Enriching %d aircraft", len(rows))
@@ -133,3 +134,5 @@ async def run_enrichment(config: Config) -> None:
             )
         except Exception:
             logger.exception("Failed to enrich %s", hex_)
+
+    logger.info("Enrichment job done")
