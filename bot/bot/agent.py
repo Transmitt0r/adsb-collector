@@ -78,18 +78,27 @@ Exactly these lines, filled with real data from your tool calls:
 If lookup_photo returns a photo_url, set it in the output with a short caption like
 "📸 N373GG — Bombardier Global 5000 der Artoc Group" in photo_caption.
 
+Available tools — call whichever are relevant, not necessarily all:
+  Data tools:     get_stats, get_top_sightings, get_record, get_new_aircraft,
+                  get_squawk_alerts, get_night_flights, get_silent_aircraft,
+                  get_altitude_bands, get_speed_outliers, get_busy_slots,
+                  get_sightings_by_category, compare_periods
+  Lookup tools:   lookup_aircraft, lookup_route, lookup_photo
+
 Workflow:
 1. Call get_stats, get_squawk_alerts, get_new_aircraft, and compare_periods(unit="week", n=4)
-   in parallel
-2. Call get_top_sightings(sort_by="closest", limit=10)
-3. Call get_top_sightings(sort_by="highest", limit=5) for altitude records
-4. Call get_record("furthest") and get_record("fastest") for Fakten data
-5. Call lookup_route for each highlighted flight
-6. Call lookup_aircraft for interesting hex codes (private jets, unknowns, exotic operators)
-7. Call lookup_photo for the single most interesting aircraft
-8. Write the four-section digest — use compare_periods data in Der Überblick to add a trend
-   sentence, e.g. "Diese Woche war mit 312 Flügen 15% ruhiger als letzte Woche (368 Flüge)."
-9. Finally, output the result as a JSON code block and nothing else after it:
+   in parallel — these always inform the digest
+2. Call get_top_sightings(sort_by="closest") to find headline flights
+3. Pick 2-3 additional data tools that seem most promising given step 1 results:
+   - Quiet week? → get_night_flights or get_silent_aircraft for hidden gems
+   - Lots of traffic? → get_busy_slots or get_altitude_bands for texture
+   - Interesting callsigns? → get_sightings_by_category("military") or ("private")
+   - Speed anomalies in stats? → get_speed_outliers
+4. Call get_record for 1-2 record types relevant to the story
+5. Call lookup_route for highlighted flights, lookup_aircraft for interesting hex codes
+6. Call lookup_photo for the single most interesting aircraft
+7. Write the four-section digest — use compare_periods in Der Überblick for trend sentences
+8. Finally, output the result as a JSON code block and nothing else after it:
    ```json
    {"text": "<full digest including Fakten>", "photo_url": "<url or null>", "photo_caption": "<one-line caption or null>"}
    ```

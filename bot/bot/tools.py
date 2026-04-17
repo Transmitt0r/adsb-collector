@@ -25,11 +25,33 @@ _SQUAWK_MEANINGS = {
 }
 
 _SORT_COLUMNS = {
-    "closest": ("s.min_distance", "ASC NULLS LAST"),
-    "highest": ("s.max_altitude", "DESC NULLS LAST"),
-    "longest": ("duration_minutes", "DESC NULLS LAST"),
-    "recent": ("s.started_at", "DESC"),
+    "closest":  ("s.min_distance",  "ASC NULLS LAST"),
+    "highest":  ("s.max_altitude",  "DESC NULLS LAST"),
+    "lowest":   ("s.min_altitude",  "ASC NULLS LAST"),
+    "longest":  ("duration_minutes","DESC NULLS LAST"),
+    "recent":   ("s.started_at",    "DESC"),
 }
+
+# Known cargo airline ICAO prefixes
+_CARGO_PREFIXES = {
+    "UPS", "FDX", "GTI", "CLX", "TAY", "BCS", "DHK", "DHL",
+    "ABX", "ATN", "GEC", "MPH", "PAC", "SWN", "TTF",
+}
+
+# Known military callsign prefixes
+_MILITARY_CALLSIGNS = {
+    "RCH", "RRR", "DUKE", "REACH", "MAGMA", "NATO", "CASA",
+    "GAF", "BAF", "FAF", "GLEX", "DRGN", "TALO",
+}
+
+# ICAO hex ranges for military aircraft (lower-cased)
+_MILITARY_HEX_RANGES = [
+    ("ae0000", "afffff"),  # US military
+    ("43c000", "43cfff"),  # UK military
+    ("3c4000", "3c7fff"),  # German military (Luftwaffe)
+    ("3a0000", "3a7fff"),  # French military
+    ("480000", "4803ff"),  # Italian military
+]
 
 
 def make_tools(collector_database_url: str) -> list:
@@ -446,6 +468,299 @@ def make_tools(collector_database_url: str) -> list:
             logger.exception("lookup_photo failed for %s", icao_hex)
             return json.dumps({"error": str(exc)})
 
+    def get_night_flights(days: int = 7) -> str:
+        """Get flights observed between 22:00 and 06:00 local time (Europe/Berlin).
+
+        Night flights are often cargo jets, red-eye passenger routes, or unusual
+        ferry/positioning flights — great story material.
+
+        Returns CSV: hex, callsign, started_at_local, max_altitude_ft, min_distance_nm
+
+        Args:
+            days: How many days back to look (default 7).
+        """
+        try:
+            with psycopg2.connect(collector_database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT
+                            hex,
+                            callsign,
+                            TO_CHAR(started_at AT TIME ZONE 'Europe/Berlin',
+                                    'Dy HH24:MI') AS started_local,
+                            max_altitude,
+                            min_distance
+                        FROM sightings
+                        WHERE started_at > now() - (%(days)s || ' days')::interval
+                          AND EXTRACT(HOUR FROM started_at AT TIME ZONE 'Europe/Berlin')
+                              NOT BETWEEN 6 AND 21
+                        ORDER BY started_at DESC
+                        LIMIT 20
+                    """, {"days": days})
+                    rows = cur.fetchall()
+            lines = ["hex,callsign,started_local,max_alt_ft,min_dist_nm"]
+            for r in rows:
+                lines.append(f"{r[0]},{r[1] or ''},{r[2]},"
+                             f"{r[3] or ''},{round(r[4], 1) if r[4] else ''}")
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.exception("get_night_flights failed")
+            return json.dumps({"error": str(exc)})
+
+    def get_silent_aircraft(days: int = 7) -> str:
+        """Get aircraft observed without a callsign — potentially military, private,
+        or ferry flights.
+
+        Returns CSV: hex, first_seen_local, max_altitude_ft, min_distance_nm.
+        Use lookup_aircraft to investigate interesting ones.
+
+        Args:
+            days: How many days back to look (default 7).
+        """
+        try:
+            with psycopg2.connect(collector_database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT
+                            hex,
+                            TO_CHAR(MIN(started_at) AT TIME ZONE 'Europe/Berlin',
+                                    'Dy HH24:MI') AS first_seen_local,
+                            MAX(max_altitude)  AS max_alt,
+                            MIN(min_distance)  AS min_dist
+                        FROM sightings
+                        WHERE started_at > now() - (%(days)s || ' days')::interval
+                          AND (callsign IS NULL OR callsign = '')
+                        GROUP BY hex
+                        ORDER BY min_dist ASC NULLS LAST
+                        LIMIT 15
+                    """, {"days": days})
+                    rows = cur.fetchall()
+            lines = ["hex,first_seen_local,max_alt_ft,min_dist_nm"]
+            for r in rows:
+                lines.append(f"{r[0]},{r[1]},"
+                             f"{r[2] or ''},{round(r[3], 1) if r[3] else ''}")
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.exception("get_silent_aircraft failed")
+            return json.dumps({"error": str(exc)})
+
+    def get_altitude_bands(days: int = 7) -> str:
+        """Get distribution of flights by altitude bracket.
+
+        Brackets (in feet):
+          ground:     alt_baro = "ground" or < 1,000 ft
+          low:        1,000 – 10,000 ft   (~300 – 3,000 m)
+          medium:    10,000 – 25,000 ft   (~3,000 – 7,600 m)
+          high:      25,000 – 40,000 ft   (~7,600 – 12,200 m)
+          very_high: > 40,000 ft          (> 12,200 m)
+
+        Useful for spotting unusual low-altitude traffic or record-high cruising.
+
+        Args:
+            days: How many days back to look (default 7).
+        """
+        try:
+            with psycopg2.connect(collector_database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT
+                            CASE
+                                WHEN max_altitude IS NULL        THEN 'unknown'
+                                WHEN max_altitude < 1000         THEN 'ground_or_low'
+                                WHEN max_altitude < 10000        THEN 'low'
+                                WHEN max_altitude < 25000        THEN 'medium'
+                                WHEN max_altitude < 40000        THEN 'high'
+                                ELSE 'very_high'
+                            END AS band,
+                            COUNT(*) AS flights
+                        FROM sightings
+                        WHERE started_at > now() - (%(days)s || ' days')::interval
+                        GROUP BY band
+                        ORDER BY MIN(COALESCE(max_altitude, 0))
+                    """, {"days": days})
+                    rows = cur.fetchall()
+            lines = ["band,flights"]
+            for r in rows:
+                lines.append(f"{r[0]},{r[1]}")
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.exception("get_altitude_bands failed")
+            return json.dumps({"error": str(exc)})
+
+    def get_speed_outliers(days: int = 7) -> str:
+        """Get unusually fast or slow aircraft from position data.
+
+        Fast (> 550 kt): likely military jets or unusual high-speed aircraft.
+        Slow (< 120 kt): prop planes, helicopters, or very slow movers.
+
+        Returns CSV: hex, callsign, max_gs_kt or min_gs_kt, type.
+
+        Args:
+            days: How many days back to look (default 7).
+        """
+        try:
+            with psycopg2.connect(collector_database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        WITH fast AS (
+                            SELECT p.hex, s.callsign, MAX(p.gs) AS gs, 'fast' AS type
+                            FROM position_updates p
+                            LEFT JOIN LATERAL (
+                                SELECT callsign FROM sightings
+                                WHERE hex = p.hex
+                                  AND started_at > now() - (%(days)s || ' days')::interval
+                                ORDER BY started_at DESC LIMIT 1
+                            ) s ON true
+                            WHERE p.time > now() - (%(days)s || ' days')::interval
+                              AND p.gs > 550
+                            GROUP BY p.hex, s.callsign
+                            ORDER BY gs DESC LIMIT 5
+                        ),
+                        slow AS (
+                            SELECT p.hex, s.callsign, MIN(p.gs) AS gs, 'slow' AS type
+                            FROM position_updates p
+                            LEFT JOIN LATERAL (
+                                SELECT callsign FROM sightings
+                                WHERE hex = p.hex
+                                  AND started_at > now() - (%(days)s || ' days')::interval
+                                ORDER BY started_at DESC LIMIT 1
+                            ) s ON true
+                            WHERE p.time > now() - (%(days)s || ' days')::interval
+                              AND p.gs > 0 AND p.gs < 120
+                            GROUP BY p.hex, s.callsign
+                            ORDER BY gs ASC LIMIT 5
+                        )
+                        SELECT * FROM fast UNION ALL SELECT * FROM slow
+                    """, {"days": days})
+                    rows = cur.fetchall()
+            lines = ["hex,callsign,gs_kt,type"]
+            for r in rows:
+                lines.append(f"{r[0]},{r[1] or ''},{round(r[2], 0)},{r[3]}")
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.exception("get_speed_outliers failed")
+            return json.dumps({"error": str(exc)})
+
+    def get_busy_slots(days: int = 7) -> str:
+        """Get the peak 1-hour traffic slot for each day in the past N days.
+
+        Useful for sentences like "Mittwoch war um 18:00 Uhr am vollsten mit 12 Flügen."
+
+        Returns CSV: date, peak_hour_local, flights_in_that_hour
+
+        Args:
+            days: How many days back to look (default 7).
+        """
+        try:
+            with psycopg2.connect(collector_database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        WITH hourly AS (
+                            SELECT
+                                DATE(started_at AT TIME ZONE 'Europe/Berlin') AS day,
+                                EXTRACT(HOUR FROM started_at AT TIME ZONE 'Europe/Berlin')::int AS hr,
+                                COUNT(*) AS cnt
+                            FROM sightings
+                            WHERE started_at > now() - (%(days)s || ' days')::interval
+                            GROUP BY day, hr
+                        )
+                        SELECT DISTINCT ON (day)
+                            TO_CHAR(day, 'Dy DD.MM.') AS day_label,
+                            hr,
+                            cnt
+                        FROM hourly
+                        ORDER BY day, cnt DESC
+                    """, {"days": days})
+                    rows = cur.fetchall()
+            lines = ["day,peak_hour,flights"]
+            for r in rows:
+                lines.append(f"{r[0]},{r[1]:02d}:00,{r[2]}")
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.exception("get_busy_slots failed")
+            return json.dumps({"error": str(exc)})
+
+    def get_sightings_by_category(
+        days: int = 7,
+        category: Literal["airline", "cargo", "military", "private", "general_aviation"] = "airline",
+    ) -> str:
+        """Get sightings filtered by aircraft category.
+
+        Categories:
+          airline:          scheduled passenger carriers (3-letter ICAO + flight number callsign)
+          cargo:            known cargo operators (UPS, FedEx, DHL, Atlas Air, etc.)
+          military:         known military hex ranges or callsign patterns
+          private:          no callsign, or registration-style callsign (business jets, etc.)
+          general_aviation: slow, low-altitude flights not matching other categories
+
+        Returns CSV: hex, callsign, started_at_local, max_alt_ft, min_dist_nm
+
+        Args:
+            days: How many days back to look (default 7).
+            category: Aircraft category to filter by (default "airline").
+        """
+        try:
+            cargo_list = list(_CARGO_PREFIXES)
+            mil_callsigns = list(_MILITARY_CALLSIGNS)
+            mil_ranges_sql = " OR ".join(
+                f"(hex >= '{lo}' AND hex <= '{hi}')"
+                for lo, hi in _MILITARY_HEX_RANGES
+            )
+
+            where_clauses = {
+                "airline": (
+                    "callsign ~ '^[A-Z]{3}[0-9]' "
+                    "AND LEFT(callsign,3) != ALL(%(cargo)s) "
+                    "AND LEFT(callsign,3) != ALL(%(mil_cs)s)"
+                ),
+                "cargo": "LEFT(callsign,3) = ANY(%(cargo)s)",
+                "military": (
+                    f"({mil_ranges_sql}) "
+                    "OR LEFT(callsign,3) = ANY(%(mil_cs)s)"
+                ),
+                "private": (
+                    "(callsign IS NULL OR callsign = '' "
+                    " OR callsign !~ '^[A-Z]{3}[0-9]')"
+                    " AND NOT (LEFT(callsign,3) = ANY(%(cargo)s))"
+                    f" AND NOT ({mil_ranges_sql})"
+                ),
+                "general_aviation": (
+                    "max_altitude < 15000 "
+                    "AND (callsign IS NULL OR callsign !~ '^[A-Z]{3}[0-9]')"
+                ),
+            }
+
+            clause = where_clauses.get(category)
+            if not clause:
+                return json.dumps({"error": f"unknown category: {category}"})
+
+            with psycopg2.connect(collector_database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"""
+                        SELECT
+                            hex,
+                            callsign,
+                            TO_CHAR(started_at AT TIME ZONE 'Europe/Berlin',
+                                    'Dy HH24:MI') AS started_local,
+                            max_altitude,
+                            min_distance
+                        FROM sightings
+                        WHERE started_at > now() - (%(days)s || ' days')::interval
+                          AND {clause}
+                        ORDER BY min_distance ASC NULLS LAST
+                        LIMIT 20
+                    """, {"days": days, "cargo": cargo_list, "mil_cs": mil_callsigns})
+                    rows = cur.fetchall()
+
+            lines = ["hex,callsign,started_local,max_alt_ft,min_dist_nm"]
+            for r in rows:
+                lines.append(f"{r[0]},{r[1] or ''},{r[2]},"
+                             f"{r[3] or ''},{round(r[4], 1) if r[4] else ''}")
+            return "\n".join(lines)
+        except Exception as exc:
+            logger.exception("get_sightings_by_category failed")
+            return json.dumps({"error": str(exc)})
+
     def compare_periods(
         unit: Literal["day", "week", "month"] = "week",
         n: int = 4,
@@ -536,6 +851,12 @@ def make_tools(collector_database_url: str) -> list:
         get_record,
         get_new_aircraft,
         get_squawk_alerts,
+        get_night_flights,
+        get_silent_aircraft,
+        get_altitude_bands,
+        get_speed_outliers,
+        get_busy_slots,
+        get_sightings_by_category,
         compare_periods,
         lookup_aircraft,
         lookup_route,
