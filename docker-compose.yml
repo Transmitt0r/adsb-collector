@@ -16,7 +16,8 @@ services:
 
   collector:
     build:
-      context: collector/
+      context: .
+      dockerfile: collector/Dockerfile
     restart: unless-stopped
     depends_on:
       db:
@@ -29,7 +30,8 @@ services:
 
   bot:
     build:
-      context: bot/
+      context: .
+      dockerfile: bot/Dockerfile
     restart: unless-stopped
     depends_on:
       db:

@@ -1,0 +1,28 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: ruff format
+        types: [python]
+
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: ruff check --fix
+        types: [python]
+
+      - id: pytest-collector
+        name: pytest (collector)
+        language: system
+        entry: bash -c 'cd collector && uv run pytest -q'
+        pass_filenames: false
+        files: ^collector/
+
+      - id: pytest-bot
+        name: pytest (bot)
+        language: system
+        entry: bash -c 'cd bot && uv sync --all-extras -q && uv run pytest -q'
+        pass_filenames: false
+        files: ^bot/

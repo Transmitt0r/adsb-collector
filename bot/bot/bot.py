@@ -44,7 +44,9 @@ def _start(config: Config):
         username = user.username if user else None
 
         is_new = register_user(config.database_url, chat_id, username)
-        logger.info("User registered: chat_id=%d username=%s new=%s", chat_id, username, is_new)
+        logger.info(
+            "User registered: chat_id=%d username=%s new=%s", chat_id, username, is_new
+        )
 
         if is_new:
             await update.message.reply_text(
@@ -83,7 +85,9 @@ def _debug(config: Config, runner: Runner):
             await update.message.reply_text("🚫 Kein Zugriff.")
             return
 
-        await update.message.reply_text("⏳ Generiere Digest… (kann eine Minute dauern)")
+        await update.message.reply_text(
+            "⏳ Generiere Digest… (kann eine Minute dauern)"
+        )
         try:
             digest = await generate_digest(runner, days=1)
             chart = generate_traffic_chart(config.database_url, days=1)
@@ -96,8 +100,9 @@ def _debug(config: Config, runner: Runner):
     return handler
 
 
-async def _send_digest(bot: Bot, chat_id: int, digest: DigestOutput,
-                       chart_png: bytes | None = None) -> None:
+async def _send_digest(
+    bot: Bot, chat_id: int, digest: DigestOutput, chart_png: bytes | None = None
+) -> None:
     """Send digest text, optional aircraft photo, then traffic chart."""
     await bot.send_message(chat_id=chat_id, text=digest.text, parse_mode="HTML")
     if digest.photo_url:
@@ -112,8 +117,9 @@ async def _send_digest(bot: Bot, chat_id: int, digest: DigestOutput,
             logger.warning("Failed to send follow-up photo to chat_id=%d", chat_id)
     if chart_png:
         try:
-            await bot.send_photo(chat_id=chat_id, photo=chart_png,
-                                 caption="📈 Flugverkehr der Woche")
+            await bot.send_photo(
+                chat_id=chat_id, photo=chart_png, caption="📈 Flugverkehr der Woche"
+            )
         except Exception:
             logger.warning("Failed to send chart to chat_id=%d", chat_id)
 

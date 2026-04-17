@@ -4,11 +4,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --no-install-project
+# Copy workspace manifests for dependency resolution (cache layer)
+COPY pyproject.toml uv.lock .python-version ./
+COPY collector/pyproject.toml collector/pyproject.toml
+RUN uv sync --locked --no-dev --no-install-project --package flighttracker
 
-COPY collector/ collector/
-RUN uv sync --locked --no-dev
+# Copy source and install
+COPY collector/collector/ collector/collector/
+RUN uv sync --locked --no-dev --package flighttracker
 
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["python", "-m", "collector"]

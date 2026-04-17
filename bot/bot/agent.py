@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import uuid
@@ -26,6 +25,7 @@ class DigestOutput(BaseModel):
     text: str
     photo_url: str | None = None
     photo_caption: str | None = None
+
 
 SYSTEM_PROMPT = """
 You are a friendly aviation digest writer. Your job is to create an engaging,
@@ -165,8 +165,11 @@ async def generate_digest(runner: Runner, days: int = 7) -> DigestOutput:
             for part in event.content.parts:
                 if hasattr(part, "function_call") and part.function_call:
                     fc = part.function_call
-                    logger.info("→ tool call: %s(%s)", fc.name,
-                                ", ".join(f"{k}={v!r}" for k, v in (fc.args or {}).items()))
+                    logger.info(
+                        "→ tool call: %s(%s)",
+                        fc.name,
+                        ", ".join(f"{k}={v!r}" for k, v in (fc.args or {}).items()),
+                    )
                 elif hasattr(part, "function_response") and part.function_response:
                     fr = part.function_response
                     preview = str(fr.response)[:120].replace("\n", " ")
@@ -184,6 +187,10 @@ async def generate_digest(runner: Runner, days: int = 7) -> DigestOutput:
         logger.error("No JSON block found. Tail of output: %s", final_text[-300:])
         raise RuntimeError(f"No JSON block found in agent output: {final_text!r}")
     result = DigestOutput.model_validate_json(match.group(1))
-    logger.info("Digest generated (%d chars, photo=%s, photo_url=%s)",
-                len(result.text), bool(result.photo_url), result.photo_url)
+    logger.info(
+        "Digest generated (%d chars, photo=%s, photo_url=%s)",
+        len(result.text),
+        bool(result.photo_url),
+        result.photo_url,
+    )
     return result

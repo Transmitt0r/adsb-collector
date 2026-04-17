@@ -41,7 +41,9 @@ class AircraftState:
             hex=data["hex"],
             timestamp=ts,
             flight=data.get("flight", "").strip() or None,
-            alt_baro=data.get("alt_baro") if isinstance(data.get("alt_baro"), int) else None,
+            alt_baro=data.get("alt_baro")
+            if isinstance(data.get("alt_baro"), int)
+            else None,
             gs=data.get("gs"),
             track=data.get("track"),
             lat=data.get("lat"),

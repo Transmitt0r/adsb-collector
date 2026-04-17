@@ -8,11 +8,14 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --no-install-project
+# Copy workspace manifests for dependency resolution (cache layer)
+COPY pyproject.toml uv.lock .python-version ./
+COPY bot/pyproject.toml bot/pyproject.toml
+RUN uv sync --locked --no-dev --no-install-project --package squawk-bot
 
-COPY bot/ bot/
-RUN uv sync --locked --no-dev
+# Copy source and install
+COPY bot/bot/ bot/bot/
+RUN uv sync --locked --no-dev --package squawk-bot
 
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["python", "-m", "bot"]

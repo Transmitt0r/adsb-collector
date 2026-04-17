@@ -17,13 +17,24 @@ See each component's `CLAUDE.md` for details:
 
 ## Dev Environment
 
-Nix devshell provides Python 3.13, uv, ruff, mypy, psql:
+Nix devshell provides Python 3.13, uv, ruff, mypy, psql, pre-commit:
 
 ```bash
-nix develop   # from repo root
+nix develop          # from repo root
+pre-commit install   # once, sets up git hooks
 ```
 
 Each component has its own `pyproject.toml` and `uv.lock`. Run tools from within the component directory.
+
+## Pre-commit hooks
+
+`.pre-commit-config.yaml` runs on every `git commit`:
+- **ruff format** — auto-formats staged `.py` files
+- **ruff check --fix** — lints and auto-fixes staged `.py` files
+- **pytest (collector)** — runs collector test suite when `collector/` files change
+- **pytest (bot)** — runs bot test suite when `bot/` files change
+
+The Claude Code PostToolUse hook (`.claude/hooks/ruff-check.sh`) also runs ruff check immediately after each file edit, for faster feedback during development.
 
 ## Infrastructure
 

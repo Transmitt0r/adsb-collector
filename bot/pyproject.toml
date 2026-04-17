@@ -13,3 +13,14 @@ dependencies = [
     "cachetools>=5.0",
     "matplotlib>=3.9",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "types-requests>=2.31",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

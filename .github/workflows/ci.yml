@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-collector:
+    name: Collector — lint & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        working-directory: collector
+        run: uv sync --all-extras
+
+      - name: Lint (ruff)
+        working-directory: collector
+        run: uv run ruff check collector tests
+
+      - name: Type-check (mypy)
+        working-directory: collector
+        run: uv run mypy collector
+
+      - name: Test (pytest)
+        working-directory: collector
+        run: uv run pytest
+
+  test-bot:
+    name: Bot — lint & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        working-directory: bot
+        run: uv sync --all-extras
+
+      - name: Lint (ruff)
+        working-directory: bot
+        run: uv run ruff check bot tests
+
+      - name: Test (pytest)
+        working-directory: bot
+        run: uv run pytest

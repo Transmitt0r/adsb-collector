@@ -29,7 +29,8 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
     try:
         with psycopg2.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         DATE(started_at AT TIME ZONE 'Europe/Berlin') AS day,
                         COUNT(*) AS flights
@@ -37,12 +38,15 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                     WHERE started_at > now() - (%(days)s || ' days')::interval
                     GROUP BY day
                     ORDER BY day
-                """, {"days": days})
+                """,
+                    {"days": days},
+                )
                 daily = cur.fetchall()
 
                 # Flights per hour split by weekday vs weekend (local time)
                 # DOW: 0=Sunday, 6=Saturday in PostgreSQL
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         EXTRACT(HOUR FROM started_at AT TIME ZONE 'Europe/Berlin')::int AS hour,
                         CASE WHEN EXTRACT(DOW FROM started_at AT TIME ZONE 'Europe/Berlin') IN (0, 6)
@@ -52,7 +56,9 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                     WHERE started_at > now() - (%(days)s || ' days')::interval
                     GROUP BY hour, day_type
                     ORDER BY hour
-                """, {"days": days})
+                """,
+                    {"days": days},
+                )
                 hourly = cur.fetchall()
 
         if not daily and not hourly:
@@ -74,14 +80,24 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                 ax_day.set_xticklabels(labels)
 
                 # Date range in title
-                fmt = lambda d: f"{d.day}.{d.month}."
-                date_range = f"{fmt(dates[0])} – {fmt(dates[-1])}" if len(dates) > 1 else fmt(dates[0])
+                def fmt(d):
+                    return f"{d.day}.{d.month}."
+
+                date_range = (
+                    f"{fmt(dates[0])} – {fmt(dates[-1])}"
+                    if len(dates) > 1
+                    else fmt(dates[0])
+                )
                 ax_day.set_title(f"Flüge pro Tag ({date_range})")
                 ax_day.set_ylabel("Flüge")
-                ax_day.legend(handles=[
-                    Patch(color="#008fd5", label="Wochentag"),
-                    Patch(color="#e05c2a", label="Wochenende"),
-                ], fontsize=7, loc="upper left")
+                ax_day.legend(
+                    handles=[
+                        Patch(color="#008fd5", label="Wochentag"),
+                        Patch(color="#e05c2a", label="Wochenende"),
+                    ],
+                    fontsize=7,
+                    loc="upper left",
+                )
 
             # --- hourly stacked area (weekday vs weekend) ---
             if hourly:
@@ -98,8 +114,12 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                 we = [we_map.get(h, 0) for h in hours]
                 total = [wd[h] + we[h] for h in hours]
 
-                ax_hour.fill_between(hours, 0, wd, color="#008fd5", alpha=0.8, label="Wochentag")
-                ax_hour.fill_between(hours, wd, total, color="#e05c2a", alpha=0.8, label="Wochenende")
+                ax_hour.fill_between(
+                    hours, 0, wd, color="#008fd5", alpha=0.8, label="Wochentag"
+                )
+                ax_hour.fill_between(
+                    hours, wd, total, color="#e05c2a", alpha=0.8, label="Wochenende"
+                )
                 ax_hour.plot(hours, total, color="black", linewidth=1, alpha=0.4)
                 ax_hour.set_xticks(range(0, 24, 3))
                 ax_hour.set_xticklabels([f"{h:02d}:00" for h in range(0, 24, 3)])

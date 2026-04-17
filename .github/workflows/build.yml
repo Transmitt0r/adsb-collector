@@ -27,7 +27,8 @@ jobs:
       - name: Build and push collector
         uses: docker/build-push-action@v6
         with:
-          context: collector/
+          context: .
+          file: collector/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/transmitt0r/squawk/collector:latest
@@ -56,7 +57,8 @@ jobs:
       - name: Build and push bot
         uses: docker/build-push-action@v6
         with:
-          context: bot/
+          context: .
+          file: bot/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/transmitt0r/squawk/bot:latest

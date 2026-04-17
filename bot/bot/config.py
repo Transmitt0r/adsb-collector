@@ -10,9 +10,9 @@ from dataclasses import dataclass
 class Config:
     bot_token: str
     anthropic_api_key: str
-    database_url: str           # shared TimescaleDB (flight data + bot state)
-    admin_chat_id: int | None   # chat ID allowed to use /debug
-    digest_schedule: str        # cron expression, default Sunday 8am
+    database_url: str  # shared TimescaleDB (flight data + bot state)
+    admin_chat_id: int | None  # chat ID allowed to use /debug
+    digest_schedule: str  # cron expression, default Sunday 8am
 
     @classmethod
     def from_env(cls) -> Config:

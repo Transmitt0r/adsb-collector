@@ -46,8 +46,18 @@ nix develop
 
 # then from bot/
 cd bot
-uv run python -m bot
+uv sync --all-extras        # install deps including dev extras (pytest, ruff)
+uv run pytest               # run tests
+uv run ruff check bot tests # lint
+uv run python -m bot        # run the bot
 ```
+
+## Test structure
+
+Tests live in `bot/tests/`. They cover:
+- `test_tools.py` — API tools (`lookup_aircraft`, `lookup_route`, `lookup_photo`) with mocked requests; error-handling contract for all DB tools; `lookup_route_batch` parsing logic
+
+Import pattern: `from bot.tools import ...` (the `bot/` package, not `bot.bot` which is the Telegram handler module).
 
 ## Deploy
 
