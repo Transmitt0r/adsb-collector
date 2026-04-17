@@ -8,6 +8,7 @@ from datetime import date
 
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import psycopg2
 
 matplotlib.use("Agg")  # headless, no display needed
@@ -63,7 +64,8 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                 x = list(range(len(dates)))
                 labels = [_DE_WEEKDAYS[d.weekday()] for d in dates]
 
-                ax_day.bar(x, counts, color="steelblue", width=0.6, zorder=3)
+                colors = ["#e05c2a" if d.weekday() >= 5 else "#008fd5" for d in dates]
+                ax_day.bar(x, counts, color=colors, width=0.6, zorder=3)
                 ax_day.set_xticks(x)
                 ax_day.set_xticklabels(labels)
 
@@ -72,6 +74,10 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
                 date_range = f"{fmt(dates[0])} – {fmt(dates[-1])}" if len(dates) > 1 else fmt(dates[0])
                 ax_day.set_title(f"Flüge pro Tag ({date_range})")
                 ax_day.set_ylabel("Flüge")
+                ax_day.legend(handles=[
+                    Patch(color="#008fd5", label="Wochentag"),
+                    Patch(color="#e05c2a", label="Wochenende"),
+                ], fontsize=7, loc="upper left")
 
             # --- hourly curve ---
             if hourly:
