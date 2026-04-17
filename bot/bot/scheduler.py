@@ -1,17 +1,19 @@
-"""Weekly digest scheduler."""
+"""Weekly digest scheduler and 15-minute enrichment job."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .agent import Runner, generate_digest
+from .agent import generate_digest
 from .bot import broadcast
 from .config import Config
 from .db import cache_digest, get_cached_digest
+from .enrichment import run_enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -22,29 +24,34 @@ def _week_bounds() -> tuple[datetime, datetime]:
     return now - timedelta(days=7), now
 
 
-async def run_weekly_digest(config: Config, runner: Runner) -> None:
+async def run_weekly_digest(config: Config) -> None:
     logger.info("Weekly digest job started")
     period_start, period_end = _week_bounds()
 
-    # Use cached digest if already generated for this period
     digest = get_cached_digest(config.database_url, period_start, period_end)
     if digest:
         logger.info("Using cached digest")
     else:
         logger.info("Generating new digest")
-        digest = await generate_digest(runner, days=7)
+        digest = await asyncio.to_thread(generate_digest, config, 7)
         cache_digest(config.database_url, period_start, period_end, digest)
 
     await broadcast(config, digest)
     logger.info("Weekly digest sent")
 
 
-def create_scheduler(config: Config, runner: Runner) -> AsyncIOScheduler:
+def create_scheduler(config: Config) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
 
-    # Parse DIGEST_SCHEDULE as a cron expression (e.g. "0 8 * * 0" = Sunday 8am)
+    scheduler.add_job(
+        run_enrichment,
+        CronTrigger(minute="*/15"),
+        kwargs={"config": config},
+        name="enrichment",
+    )
+
     parts = config.digest_schedule.split()
-    trigger = CronTrigger(
+    digest_trigger = CronTrigger(
         minute=parts[0],
         hour=parts[1],
         day=parts[2],
@@ -52,11 +59,10 @@ def create_scheduler(config: Config, runner: Runner) -> AsyncIOScheduler:
         day_of_week=parts[4],
         timezone="Europe/Berlin",
     )
-
     scheduler.add_job(
         run_weekly_digest,
-        trigger=trigger,
-        kwargs={"config": config, "runner": runner},
+        trigger=digest_trigger,
+        kwargs={"config": config},
         name="weekly_digest",
     )
 

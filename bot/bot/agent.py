@@ -1,24 +1,19 @@
-"""Google ADK agent with Claude Haiku via LiteLLM."""
+"""Digest generation: single Anthropic SDK call from pre-enriched data."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-import uuid
 
-from google.adk.agents import LlmAgent
-from google.adk.models.lite_llm import LiteLlm
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
+import anthropic
 from pydantic import BaseModel
 
 from .config import Config
-from .tools import make_tools
+from .db import get_digest_candidates, get_digest_stats
+from .tools import lookup_photo
 
 logger = logging.getLogger(__name__)
-
-APP_NAME = "adsb_digest"
 
 
 class DigestOutput(BaseModel):
@@ -28,169 +23,211 @@ class DigestOutput(BaseModel):
 
 
 SYSTEM_PROMPT = """
-You are a friendly aviation digest writer. Your job is to create an engaging,
-conversational digest of interesting flights observed by a personal ADS-B receiver
-near Stuttgart, Germany.
+Du bist ein unterhaltsamer Luftfahrt-Journalist, der einen wöchentlichen Digest
+über Flugzeuge schreibt, die von einem privaten ADS-B-Empfänger nahe Stuttgart
+empfangen wurden.
 
-Your reader is an aviation enthusiast who loves planes but isn't interested in
-technical jargon. She wants to know the stories: where planes were going, what
-kind of planes flew over, anything unusual or exciting.
+Dein Leser liebt Flugzeuge, will aber keine Statistiken — er will Geschichten.
+Welche Flugzeuge waren interessant? Wer flog wohin? Was war ungewöhnlich?
 
-Golden rule: every flight you mention must be anchored to the receiver — the reader should
-always feel "wow, my little antenna caught that!" Never just say "Emirates flew to Dubai" —
-say "unser SDR hat Emirates auf dem Weg nach Dubai erwischt" or "direkt über unserem Dach".
+GOLDENE REGEL: Jeder erwähnte Flug muss am Empfänger verankert sein — immer
+"unser SDR hat X erwischt" oder "direkt über unserem Dach". Nicht einfach
+"Emirates flog nach Dubai".
 
-Format:
-- German, casual warm tone — like a friend recapping an exciting week
-- Telegram HTML only: <b>bold</b> for section headers and aircraft names/registrations,
-  <i>italic</i> for fun asides. No markdown whatsoever (no **, no ##, no - bullets).
-- Use emojis freely throughout
-- Altitudes are in feet — always convert: meters = feet ÷ 3.281, round to nearest 100 m.
-  Example: 38,000 ft → 11,600 m. Never write raw feet values.
-- Distances are in nautical miles — always convert to km (× 1.852). Never say "Seemeilen".
-  Under 0.3 nm → write "direkt über uns" / "direkt über unserem Dach" instead of a number.
-  0.3–1 nm → "nur ~X km entfernt". Over 1 nm → "X km entfernt".
-- For exotic destinations (outside central Europe), add a one-sentence fun fact in parentheses
-- If get_squawk_alerts has results, make that the opening of the Highlights section
+FORMAT (Telegram HTML, KEIN Markdown):
+- <b>fett</b> für Abschnittsüberschriften und Flugzeugnamen
+- <i>kursiv</i> für Einschübe und Fun Facts
+- Emojis großzügig einsetzen
+- Altituden: immer in Metern angeben (feet ÷ 3,281, auf 100 m runden)
+- Distanzen: immer in km (Seemeilen × 1,852)
+  - unter 0,3 nm → "direkt über uns"
+  - 0,3–1 nm → "nur ~X km entfernt"
+- Bei exotischen Zielen (außerhalb Mitteleuropas): kurze Klammerbemerkung
 
-Structure — write exactly these four sections:
+STRUKTUR — genau diese vier Abschnitte:
 
 <b>✈️ Highlights der Woche</b>
-2-3 paragraphs on the most special flights only: private jets, unusual operators, long-haul
-overflights, emergency squawks, rare aircraft types. One paragraph per highlight. Use
-lookup_route for origin/destination, lookup_aircraft for operator/type. Only this section
-names individual callsigns or registrations.
+2-3 Absätze über die interessantesten Flugzeuge (hohe Scores, military, private jets,
+exotische Operator, Notfall-Squawks). Ein Absatz pro Highlight. Nur hier: individuelle
+Kennzeichen oder Registrierungen nennen.
 
 <b>🌍 Der Überblick</b>
-1-2 paragraphs summarising routine traffic in aggregate — NO individual flight listings.
-Write things like "Ryanair war wieder fleißigster Gast mit X Flügen, hauptsächlich Richtung
-Mittelmeer" or "Viel Urlaubsverkehr Richtung Spanien und Griechenland diese Woche."
+1-2 Absätze über den normalen Verkehr zusammengefasst — KEINE Einzelauflistung.
+Beispiel: "Ryanair war wieder fleißigster Gast mit X Flügen, hauptsächlich Richtung
+Mittelmeer."
 
 <b>🆕 Neue Gesichter</b>
-2-3 of the most interesting first-time visitors from get_new_aircraft. Use lookup_aircraft
-for the interesting ones. If none stand out, one short sentence is fine.
+2-3 der interessantesten Erstbesucher aus den Kandidaten mit is_new_aircraft=true.
+Falls keine interessanten dabei, ein kurzer Satz.
 
 <b>📊 Fakten der Woche</b>
-Exactly these lines, filled with real data from your tool calls:
+Genau diese Zeilen mit echten Daten:
 ✈️ Flüge gesichtet: <total_sightings>
 🛬 Verschiedene Flugzeuge: <unique_aircraft>
-🆕 Erstbesucher: <new_aircraft_count>
-🏆 Fleißigste Airline: <top operator name and count>
-📏 Weiteste Sichtung: <callsign or hex>, <distance in km>
-⛰️ Höchster Flug: <callsign or registration>, <altitude in meters>
+🆕 Erstbesucher: <new_aircraft>
+📏 Weiteste Annäherung: <callsign>, <distance km>
+⛰️ Höchster Flug: <callsign oder Reg>, <altitude m>
 
-If lookup_photo returns a photo_url, set it in the output with a short caption like
-"📸 N373GG — Bombardier Global 5000 der Artoc Group" in photo_caption.
+Falls ein Notfall-Squawk vorhanden: mache ihn zur Eröffnungsgeschichte der Highlights.
+Falls photo_url verfügbar: setze es im Output mit einer kurzen photo_caption.
 
-Available tools — call whichever are relevant, not necessarily all:
-  Core data:      get_stats, get_top_sightings, get_record, get_new_aircraft,
-                  get_squawk_alerts, compare_periods
-  Traffic detail: get_night_flights, get_silent_aircraft, get_altitude_bands,
-                  get_speed_outliers, get_busy_slots, get_sightings_by_category,
-                  get_operator_breakdown, get_low_passes, get_formation_windows,
-                  get_track_distribution, get_vertical_speed_outliers
-  Aircraft intel: get_return_visitors_detail, get_rare_visitors, get_callsign_history,
-                  get_approach_hints, get_signal_records, get_squawk_distribution,
-                  get_distance_percentiles, get_weekly_rhythm
-  Lookup tools:   lookup_aircraft, lookup_route, lookup_route_batch, lookup_photo
-
-Workflow:
-1. Call get_stats, get_squawk_alerts, get_new_aircraft, and compare_periods(unit="week", n=4)
-   in parallel — these always inform the digest
-2. Call get_top_sightings(sort_by="closest") to find headline flights; also call
-   get_operator_breakdown for Der Überblick airline summaries
-3. Pick 2-3 additional data tools that seem most promising given step 1-2 results:
-   - Quiet week? → get_night_flights, get_silent_aircraft, or get_rare_visitors for hidden gems
-   - Lots of traffic? → get_busy_slots, get_altitude_bands, or get_formation_windows for texture
-   - Interesting callsigns? → get_sightings_by_category("military") or ("private")
-   - Speed anomalies in stats? → get_speed_outliers or get_vertical_speed_outliers
-   - Low-level traffic? → get_low_passes or get_approach_hints
-   - Want traffic flow context? → get_track_distribution or get_weekly_rhythm
-4. Call get_record for 1-2 record types relevant to the story
-5. Use lookup_route_batch for multiple callsigns at once; lookup_aircraft for interesting hexes;
-   get_callsign_history for aircraft seen before under different callsigns
-6. Call lookup_photo for the single most interesting aircraft
-7. Write the four-section digest — use compare_periods in Der Überblick for trend sentences
-8. Finally, output the result as a JSON code block and nothing else after it:
-   ```json
-   {"text": "<full digest including Fakten>", "photo_url": "<url or null>", "photo_caption": "<one-line caption or null>"}
-   ```
+Gib am Ende NUR diesen JSON-Block aus (nichts danach):
+```json
+{"text": "<vollständiger Digest>", "photo_url": "<url oder null>", "photo_caption": "<caption oder null>"}
+```
 """.strip()
 
 
-def create_runner(config: Config) -> Runner:
-    tools = make_tools(config.database_url)
-    agent = LlmAgent(
-        model=LiteLlm(model="anthropic/claude-haiku-4-5-20251001"),
-        name="flight_digest_agent",
-        description="Generates engaging weekly flight digests from ADS-B data.",
-        instruction=SYSTEM_PROMPT,
-        tools=tools,
+def _build_data_packet(
+    candidates: list[dict], stats: dict, photos: dict[str, dict]
+) -> str:
+    lines = ["=== WOCHENSTATISTIK ==="]
+    lines.append(
+        f"Flüge: {stats['total_sightings']} | "
+        f"Verschiedene Flugzeuge: {stats['unique_aircraft']} | "
+        f"Erstbesucher: {stats['new_aircraft']}"
     )
-    session_service = InMemorySessionService()
-    return Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
+    if stats.get("peak_hour") is not None:
+        lines.append(
+            f"Stoßzeit: {stats['peak_hour']:02d}:00 Uhr ({stats.get('peak_count', '?')} Flüge)"
+        )
+    if stats.get("squawk_alerts"):
+        for alert in stats["squawk_alerts"]:
+            lines.append(
+                f"⚠️ NOTFALL-SQUAWK {alert['squawk']} ({alert['meaning']}): "
+                f"hex={alert['hex']} um {alert['time']}"
+            )
+    else:
+        lines.append("Notfall-Squawks: keine")
 
-
-async def generate_digest(runner: Runner, days: int = 7) -> DigestOutput:
-    """Run the agent and return a structured DigestOutput."""
-    user_id = "digest_job"
-    session_id = str(uuid.uuid4())
-
-    session_service = runner.session_service
-    await session_service.create_session(
-        app_name=APP_NAME,
-        user_id=user_id,
-        session_id=session_id,
-    )
-
-    prompt = (
-        f"Erstelle einen Digest der letzten {days} Tage. "
-        "Nutze get_sightings, get_records, get_new_aircraft und get_squawk_alerts, "
-        "dann lookup_route und lookup_aircraft für die interessantesten Flüge, "
-        "und lookup_photo für das Highlight-Flugzeug."
+    lines.append("")
+    lines.append(
+        f"=== TOP-KANDIDATEN ({len(candidates)} Flugzeuge, sortiert nach Interesse) ==="
     )
 
-    message = types.Content(
-        role="user",
-        parts=[types.Part(text=prompt)],
+    for i, c in enumerate(candidates, 1):
+        hex_ = c["hex"]
+        score = c.get("story_score") or "?"
+        tags = ", ".join(c.get("story_tags") or []) or "-"
+        callsign = c.get("callsign") or "-"
+
+        block = [
+            f"\n[{i}] callsign={callsign}  hex={hex_}  score={score}  tags=[{tags}]"
+        ]
+
+        # Registration / type / operator
+        reg_parts = []
+        if c.get("type"):
+            reg_parts.append(f"Typ: {c['type']}")
+        if c.get("registration"):
+            reg_parts.append(f"Reg: {c['registration']}")
+        if c.get("operator"):
+            reg_parts.append(f"Betreiber: {c['operator']}")
+        if c.get("flag"):
+            reg_parts.append(c["flag"])
+        if reg_parts:
+            block.append("  " + " | ".join(reg_parts))
+        else:
+            block.append("  Keine Registrierungsdaten")
+
+        # Route
+        route_parts = []
+        if c.get("origin_city"):
+            origin = c["origin_city"]
+            if c.get("origin_country"):
+                origin += f" ({c['origin_country']})"
+            if c.get("origin_iata"):
+                origin += f" [{c['origin_iata']}]"
+            route_parts.append(origin)
+        if c.get("dest_city"):
+            dest = c["dest_city"]
+            if c.get("dest_country"):
+                dest += f" ({c['dest_country']})"
+            if c.get("dest_iata"):
+                dest += f" [{c['dest_iata']}]"
+            route_parts.append(dest)
+        if route_parts:
+            block.append("  Route: " + " → ".join(route_parts))
+
+        # Flight profile
+        profile_parts = [f"Besuche: {c['visit_count']}x"]
+        if c.get("closest_nm") is not None:
+            km = round(float(c["closest_nm"]) * 1.852, 1)
+            profile_parts.append(f"nächste Annäherung: {km} km")
+        if c.get("max_alt_ft") is not None:
+            m = round(int(c["max_alt_ft"]) / 3.281 / 100) * 100
+            profile_parts.append(f"max. Höhe: {m:,} m")
+        if c.get("first_seen_local"):
+            profile_parts.append(f"erste Sichtung: {c['first_seen_local']}")
+        block.append("  " + " | ".join(profile_parts))
+
+        if c.get("lm_annotation"):
+            block.append(f"  KI-Notiz: {c['lm_annotation']}")
+
+        # Photo
+        photo = photos.get(hex_)
+        if photo and photo.get("photo_url"):
+            photographer = photo.get("photographer", "")
+            caption = f"{c.get('registration') or hex_}"
+            if c.get("type"):
+                caption += f" — {c['type']}"
+            if photographer:
+                caption += f" (📸 {photographer})"
+            block.append(f"  Foto: {photo['photo_url']}  caption: {caption}")
+
+        lines.append("\n".join(block))
+
+    return "\n".join(lines)
+
+
+def generate_digest(config: Config, days: int = 7) -> DigestOutput:
+    """Generate a digest from pre-enriched data with a single Haiku call."""
+    candidates = get_digest_candidates(config.database_url, days)
+    stats = get_digest_stats(config.database_url, days)
+
+    # Fetch photos for the top 2 candidates by story_score
+    photos: dict[str, dict] = {}
+    for candidate in candidates[:2]:
+        hex_ = candidate["hex"]
+        try:
+            photo_json = lookup_photo(hex_)
+            photo_data = json.loads(photo_json)
+            if "error" not in photo_data:
+                photos[hex_] = photo_data
+        except Exception:
+            logger.warning("Photo lookup failed for %s", hex_)
+
+    data_packet = _build_data_packet(candidates, stats, photos)
+    logger.info(
+        "Digest data packet: %d candidates, %d chars",
+        len(candidates),
+        len(data_packet),
     )
 
-    final_text = ""
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=message,
-    ):
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if hasattr(part, "function_call") and part.function_call:
-                    fc = part.function_call
-                    logger.info(
-                        "→ tool call: %s(%s)",
-                        fc.name,
-                        ", ".join(f"{k}={v!r}" for k, v in (fc.args or {}).items()),
-                    )
-                elif hasattr(part, "function_response") and part.function_response:
-                    fr = part.function_response
-                    preview = str(fr.response)[:120].replace("\n", " ")
-                    logger.info("← tool result: %s → %s…", fr.name, preview)
-        if event.is_final_response() and event.content and event.content.parts:
-            final_text = event.content.parts[0].text
+    client = anthropic.Anthropic(api_key=config.anthropic_api_key)
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": data_packet}],
+    )
+    final_text = response.content[0].text
+    logger.info(
+        "Digest response: %d chars, input_tokens=%d output_tokens=%d",
+        len(final_text),
+        response.usage.input_tokens,
+        response.usage.output_tokens,
+    )
 
-    if not final_text:
-        raise RuntimeError("Agent produced no output")
-
-    # Extract JSON from ```json ... ``` code block
-    logger.info("Agent output tail: %s", final_text[-400:])
     match = re.search(r"```json\s*(\{.*?\})\s*```", final_text, re.DOTALL)
     if not match:
-        logger.error("No JSON block found. Tail of output: %s", final_text[-300:])
-        raise RuntimeError(f"No JSON block found in agent output: {final_text!r}")
+        logger.error("No JSON block in digest response. Tail: %s", final_text[-300:])
+        raise RuntimeError(f"No JSON block found in digest output: {final_text!r}")
+
     result = DigestOutput.model_validate_json(match.group(1))
     logger.info(
-        "Digest generated (%d chars, photo=%s, photo_url=%s)",
+        "Digest generated (%d chars, photo=%s)",
         len(result.text),
         bool(result.photo_url),
-        result.photo_url,
     )
     return result

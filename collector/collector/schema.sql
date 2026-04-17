@@ -5,10 +5,34 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- Aircraft registry: one row per unique ICAO hex address
 CREATE TABLE IF NOT EXISTS aircraft (
-    hex         TEXT PRIMARY KEY,
-    first_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    callsigns   TEXT[] NOT NULL DEFAULT '{}'
+    hex             TEXT PRIMARY KEY,
+    first_seen      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    callsigns       TEXT[] NOT NULL DEFAULT '{}',
+    -- Enrichment fields (populated by bot enrichment job)
+    registration    TEXT,
+    type            TEXT,
+    operator        TEXT,
+    flag            TEXT,
+    fetched_at      TIMESTAMPTZ,
+    story_score     INT,
+    story_tags      TEXT[],
+    lm_annotation   TEXT,
+    enriched_at     TIMESTAMPTZ
+);
+
+-- Callsign route cache: origin/destination per flight callsign
+CREATE TABLE IF NOT EXISTS callsign_routes (
+    callsign        TEXT PRIMARY KEY,
+    origin_iata     TEXT,
+    origin_icao     TEXT,
+    origin_city     TEXT,
+    origin_country  TEXT,
+    dest_iata       TEXT,
+    dest_icao       TEXT,
+    dest_city       TEXT,
+    dest_country    TEXT,
+    fetched_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Sightings: one row per continuous observation session of an aircraft

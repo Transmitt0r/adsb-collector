@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from .agent import DigestOutput, Runner, generate_digest
+from .agent import DigestOutput, generate_digest
 from .charts import generate_traffic_chart
 from .config import Config
 from .db import get_active_users, register_user, unregister_user
@@ -15,7 +16,7 @@ from .db import get_active_users, register_user, unregister_user
 logger = logging.getLogger(__name__)
 
 
-def build_app(config: Config, runner: Runner, scheduler) -> Application:
+def build_app(config: Config, scheduler) -> Application:
     async def _post_init(app: Application) -> None:
         scheduler.start()
         logger.info("Scheduler started")
@@ -33,7 +34,7 @@ def build_app(config: Config, runner: Runner, scheduler) -> Application:
     )
     app.add_handler(CommandHandler("start", _start(config)))
     app.add_handler(CommandHandler("stop", _stop(config)))
-    app.add_handler(CommandHandler("debug", _debug(config, runner)))
+    app.add_handler(CommandHandler("debug", _debug(config)))
     return app
 
 
@@ -77,7 +78,7 @@ def _stop(config: Config):
     return handler
 
 
-def _debug(config: Config, runner: Runner):
+def _debug(config: Config):
     async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
 
@@ -89,7 +90,7 @@ def _debug(config: Config, runner: Runner):
             "⏳ Generiere Digest… (kann eine Minute dauern)"
         )
         try:
-            digest = await generate_digest(runner, days=1)
+            digest = await asyncio.to_thread(generate_digest, config, 1)
             chart = generate_traffic_chart(config.database_url, days=1)
             bot = update.get_bot()
             await _send_digest(bot, update.effective_chat.id, digest, chart)

@@ -151,16 +151,6 @@ def _mock_response(status_code: int = 200, json_data: dict | None = None) -> Mag
     return resp
 
 
-@pytest.fixture(autouse=True)
-def clear_caches() -> None:
-    """Prevent cache hits from bleeding between tests."""
-    import bot.tools as tools_module
-
-    tools_module._aircraft_cache.clear()
-    tools_module._route_cache.clear()
-    tools_module._photo_cache.clear()
-
-
 def test_lookup_aircraft_happy_path(tools: dict) -> None:
     payload = {
         "response": {
@@ -198,28 +188,6 @@ def test_lookup_aircraft_network_error_returns_error(tools: dict) -> None:
 
     data = json.loads(result)
     assert "error" in data
-
-
-def test_lookup_aircraft_caches_result(tools: dict) -> None:
-    payload = {
-        "response": {
-            "aircraft": {
-                "registration": "D-ABCD",
-                "type": "A320",
-                "icao_type": "A320",
-                "registered_owner": "LH",
-                "registered_owner_country_name": "Germany",
-                "registered_owner_country_iso_name": "DE",
-            }
-        }
-    }
-    with patch(
-        "bot.tools.requests.get", return_value=_mock_response(200, payload)
-    ) as mock_get:
-        tools["lookup_aircraft"]("3c6444")
-        tools["lookup_aircraft"]("3c6444")  # second call — should hit cache
-
-    assert mock_get.call_count == 1
 
 
 # ---------------------------------------------------------------------------
