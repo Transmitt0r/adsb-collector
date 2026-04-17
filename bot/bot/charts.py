@@ -53,7 +53,7 @@ def generate_traffic_chart(database_url: str, days: int = 7) -> bytes | None:
         if not daily and not hourly:
             return None
 
-        with plt.xkcd():
+        with plt.style.context("fivethirtyeight"):
             fig, (ax_day, ax_hour) = plt.subplots(2, 1, figsize=(7, 5.5))
 
             # --- daily bars ---
