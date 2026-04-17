@@ -57,12 +57,16 @@
               pkgs.mypy
               pkgs.postgresql
               pkgs.pre-commit
+              pkgs.dbmate
             ];
 
             env = {
               UV_NO_SYNC = "1";
               UV_PYTHON = pkgs.python313.interpreter;
               UV_PYTHON_DOWNLOADS = "never";
+            } // lib.optionalAttrs pkgs.stdenv.isDarwin {
+              # Ryuk mounts the Docker socket, which fails on Colima (macOS).
+              TESTCONTAINERS_RYUK_DISABLED = "true";
             };
 
             shellHook = ''
