@@ -1095,7 +1095,7 @@ for all application queries — no ORM or query builder.
       and `callsign_routes` — idempotent),
       `get_expired(hexes, ttl) -> list[tuple[str, str | None]]` (hex + callsign).
       Owns: `enriched_aircraft`, `callsign_routes`
-- [ ] **6.3** Write `squawk/repositories/digest.py`: `DigestRepository` with
+- [x] **6.3** Write `squawk/repositories/digest.py`: `DigestRepository` with
       `get_cached(reference_date, n_days) -> DigestOutput | None`,
       `cache(reference_date, n_days, digest)`. Owns: `digests`
 - [ ] **6.4** Write `squawk/repositories/users.py`: `UserRepository` with
