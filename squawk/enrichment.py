@@ -26,26 +26,26 @@ logger = logging.getLogger(__name__)
 _APP_NAME = "adsb_enrichment"
 
 _SCORING_SYSTEM_PROMPT = """
-Du bewertest Flugzeuge für einen wöchentlichen ADS-B-Digest nahe Stuttgart.
-Für jedes Flugzeug in der Liste gibst du einen Score (1–10) zurück:
+You rate aircraft for a weekly ADS-B digest near Stuttgart, Germany.
+For each aircraft in the list, return a score (1–10):
 
-Score-Richtlinien:
-- 1–3: Alltäglicher Linienverkehr (Ryanair, Eurowings, kurze Inlandsrouten)
-- 4–6: Interessant aber normal (Langstrecke, Frachter, unbekannte Operator)
-- 7–8: Ungewöhnlich (Militär, Privatjet, exotisches Ziel, seltener Typ)
-- 9–10: Sehr selten oder außergewöhnlich (historisches Flugzeug, Notfall-Squawk,
-        medizinische Evakuierung, VIP-Transport)
+Score guidelines:
+- 1–3: Routine commercial traffic (Ryanair, Eurowings, short domestic routes)
+- 4–6: Interesting but normal (long-haul, cargo, unfamiliar operator)
+- 7–8: Unusual (military, private jet, exotic destination, rare type)
+- 9–10: Very rare or extraordinary (historic aircraft, emergency squawk,
+        medical evacuation, VIP transport)
 
-WICHTIG: Squawk 7500 (Entführung), 7600 (Funkausfall), 7700 (Notfall) → Score ≥ 9.
+IMPORTANT: Squawk 7500 (hijack), 7600 (radio failure), 7700 (emergency) → Score ≥ 9.
 
-tags: kurze englische Schlagwörter (z.B. "military", "cargo", "bizjet",
+tags: short English keywords (e.g. "military", "cargo", "bizjet",
       "emergency", "long-haul", "low-altitude", "unusual-operator")
 
-annotation: ein einziger Satz auf Deutsch, der erklärt, warum das Flugzeug
-interessant ist. Leer lassen (""), wenn das Flugzeug unremarkable ist (Score ≤ 3).
+annotation: a single English sentence explaining why the aircraft is interesting.
+Leave empty ("") if unremarkable (score ≤ 3).
 
-Die Ausgabe ist ein JSON-Objekt mit einem Feld "results", das ein Array mit genau
-so vielen Einträgen enthält wie die Eingabeliste — in der gleichen Reihenfolge.
+The output is a JSON object with a field "results" containing an array with exactly
+as many entries as the input list — in the same order.
 """.strip()
 
 
@@ -58,7 +58,7 @@ so vielen Einträgen enthält wie die Eingabeliste — in der gleichen Reihenfol
 class ScoreResult:
     score: int  # 1–10
     tags: list[str]
-    annotation: str  # one German sentence; empty string if unremarkable
+    annotation: str  # one English sentence; empty string if unremarkable
 
 
 class ScoringClient(Protocol):
@@ -118,7 +118,7 @@ class _GeminiScoringClient:
     if the returned array length mismatches the input.
     """
 
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash") -> None:
+    def __init__(self, api_key: str, model: str = "gemini-3-flash-preview") -> None:
         os.environ.setdefault("GOOGLE_API_KEY", api_key)
         self._api_key = api_key
         self._model = model
@@ -149,7 +149,7 @@ class _GeminiScoringClient:
         aircraft: list[tuple[str, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         input_dicts = [_aircraft_to_dict(h, i, r) for h, i, r in aircraft]
-        user_text = "Flugzeuge:\n" + json.dumps(
+        user_text = "Aircraft:\n" + json.dumps(
             input_dicts, ensure_ascii=False, indent=2
         )
 
@@ -214,7 +214,7 @@ class _GeminiScoringClient:
         results: list[ScoreResult] = []
         for hex_, info, route in aircraft:
             input_dicts = [_aircraft_to_dict(hex_, info, route)]
-            user_text = "Flugzeuge:\n" + json.dumps(input_dicts, ensure_ascii=False)
+            user_text = "Aircraft:\n" + json.dumps(input_dicts, ensure_ascii=False)
 
             agent = LlmAgent(
                 model=self._model,

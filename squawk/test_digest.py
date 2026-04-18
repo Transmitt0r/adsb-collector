@@ -19,6 +19,7 @@ from testcontainers.postgres import PostgresContainer
 
 from squawk.clients.planespotters import PhotoInfo
 from squawk.digest import DigestOutput, generate_digest
+from squawk.queries.charts import ChartQuery
 from squawk.queries.digest import DigestQuery
 from squawk.repositories.digest import DigestRepository
 
@@ -65,7 +66,9 @@ class _MockBroadcaster:
     def __init__(self) -> None:
         self.calls: list[DigestOutput] = []
 
-    async def broadcast(self, digest: DigestOutput) -> None:
+    async def broadcast(
+        self, digest: DigestOutput, chart_png: bytes | None = None
+    ) -> None:
         self.calls.append(digest)
 
 
@@ -252,6 +255,11 @@ def query(pool: asyncpg.Pool) -> DigestQuery:
     return DigestQuery(pool)
 
 
+@pytest.fixture
+def chart_query(pool: asyncpg.Pool) -> ChartQuery:
+    return ChartQuery(pool)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -261,6 +269,7 @@ async def test_generate_digest_fresh(
     pool: asyncpg.Pool,
     digest_repo: DigestRepository,
     query: DigestQuery,
+    chart_query: ChartQuery,
 ) -> None:
     await _seed_data(pool)
 
@@ -274,6 +283,7 @@ async def test_generate_digest_fresh(
 
     await generate_digest(
         query=query,
+        chart_query=chart_query,
         digest_repo=digest_repo,
         photo_client=photo_client,
         digest_client=digest_client,
@@ -304,6 +314,7 @@ async def test_generate_digest_cache_hit(
     pool: asyncpg.Pool,
     digest_repo: DigestRepository,
     query: DigestQuery,
+    chart_query: ChartQuery,
 ) -> None:
     cached_text = "Cached digest from last week."
     cached_digest = DigestOutput(text=cached_text, photo_url=None, photo_caption=None)
@@ -321,6 +332,7 @@ async def test_generate_digest_cache_hit(
 
     await generate_digest(
         query=query,
+        chart_query=chart_query,
         digest_repo=digest_repo,
         photo_client=_MockPhotoClient(),
         digest_client=digest_client,
@@ -339,6 +351,7 @@ async def test_generate_digest_force_bypasses_cache(
     pool: asyncpg.Pool,
     digest_repo: DigestRepository,
     query: DigestQuery,
+    chart_query: ChartQuery,
 ) -> None:
     await _seed_data(pool)
 
@@ -362,6 +375,7 @@ async def test_generate_digest_force_bypasses_cache(
 
     await generate_digest(
         query=query,
+        chart_query=chart_query,
         digest_repo=digest_repo,
         photo_client=_MockPhotoClient(),
         digest_client=digest_client,
@@ -384,6 +398,7 @@ async def test_generate_digest_fetches_photos_for_top_candidates(
     pool: asyncpg.Pool,
     digest_repo: DigestRepository,
     query: DigestQuery,
+    chart_query: ChartQuery,
 ) -> None:
     await _insert_aircraft(pool, "aaa111", callsigns=["FL111"])
     await _insert_sighting(pool, "aaa111", callsign="FL111")
@@ -407,6 +422,7 @@ async def test_generate_digest_fetches_photos_for_top_candidates(
     now = datetime.now(tz=timezone.utc)
     await generate_digest(
         query=query,
+        chart_query=chart_query,
         digest_repo=digest_repo,
         photo_client=photo_client,
         digest_client=digest_client,

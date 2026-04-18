@@ -14,34 +14,25 @@ services:
       timeout: 5s
       retries: 10
 
-  collector:
-    build:
-      context: .
-      dockerfile: collector/Dockerfile
+  squawk:
+    build: .
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
       ADSB_URL: ${ADSB_URL}
-      POLL_INTERVAL: ${POLL_INTERVAL:-5}
-      SESSION_TIMEOUT: ${SESSION_TIMEOUT:-300}
       DATABASE_URL: ${DATABASE_URL}
-
-  bot:
-    build:
-      context: .
-      dockerfile: bot/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
       BOT_TOKEN: ${BOT_TOKEN}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
-      DATABASE_URL: ${DATABASE_URL}
       ADMIN_CHAT_ID: ${ADMIN_CHAT_ID:-}
+      POLL_INTERVAL: ${POLL_INTERVAL:-5}
+      SESSION_TIMEOUT: ${SESSION_TIMEOUT:-300}
       DIGEST_SCHEDULE: ${DIGEST_SCHEDULE:-0 8 * * 0}
+      ENRICHMENT_TTL_DAYS: ${ENRICHMENT_TTL_DAYS:-30}
+      ENRICHMENT_BATCH_SIZE: ${ENRICHMENT_BATCH_SIZE:-20}
+      ENRICHMENT_FLUSH_SECS: ${ENRICHMENT_FLUSH_SECS:-30}
+      CLIENT_MAX_RETRIES: ${CLIENT_MAX_RETRIES:-3}
 
 volumes:
   db_data:

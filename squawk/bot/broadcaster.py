@@ -23,7 +23,9 @@ _CAPTION_LIMIT = 1024
 
 
 class Broadcaster(Protocol):
-    async def broadcast(self, digest: DigestOutput) -> None:
+    async def broadcast(
+        self, digest: DigestOutput, chart_png: bytes | None = None
+    ) -> None:
         """Send digest to all active users."""
 
 
@@ -38,13 +40,12 @@ class TelegramBroadcaster:
         self._bot = app.bot
         self._users = users
 
-    async def broadcast(self, digest: DigestOutput) -> None:
+    async def broadcast(
+        self, digest: DigestOutput, chart_png: bytes | None = None
+    ) -> None:
         """Send digest to all active users.
 
-        If photo_url is set, sends a photo with caption. If the digest text
-        exceeds Telegram's caption limit the photo is sent with the truncated
-        caption and the full text follows as a separate message.
-
+        Sends text, then optional aircraft photo, then optional traffic chart.
         Failures for individual users are logged and skipped so a single bad
         chat_id does not abort delivery to the remaining recipients.
         """
@@ -57,38 +58,33 @@ class TelegramBroadcaster:
 
         for chat_id in chat_ids:
             try:
-                await self._send_to(chat_id, digest)
+                await self._send_to(chat_id, digest, chart_png)
             except TelegramError as exc:
                 logger.warning(
                     "broadcaster: failed to deliver to chat_id=%s: %s", chat_id, exc
                 )
 
-    async def _send_to(self, chat_id: int, digest: DigestOutput) -> None:
+    async def _send_to(
+        self,
+        chat_id: int,
+        digest: DigestOutput,
+        chart_png: bytes | None = None,
+    ) -> None:
+        await self._bot.send_message(
+            chat_id=chat_id,
+            text=digest.text,
+            parse_mode=ParseMode.HTML,
+        )
         if digest.photo_url:
             caption = digest.photo_caption or ""
-            # If the full text fits in a caption, send everything in one message.
-            if len(digest.text) <= _CAPTION_LIMIT:
-                await self._bot.send_photo(
-                    chat_id=chat_id,
-                    photo=digest.photo_url,
-                    caption=digest.text,
-                    parse_mode=ParseMode.HTML,
-                )
-            else:
-                # Photo with its own caption, then the full digest as text.
-                await self._bot.send_photo(
-                    chat_id=chat_id,
-                    photo=digest.photo_url,
-                    caption=caption[:_CAPTION_LIMIT] if caption else None,
-                )
-                await self._bot.send_message(
-                    chat_id=chat_id,
-                    text=digest.text,
-                    parse_mode=ParseMode.HTML,
-                )
-        else:
-            await self._bot.send_message(
+            await self._bot.send_photo(
                 chat_id=chat_id,
-                text=digest.text,
-                parse_mode=ParseMode.HTML,
+                photo=digest.photo_url,
+                caption=caption[:_CAPTION_LIMIT] if caption else None,
+            )
+        if chart_png:
+            await self._bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_png,
+                caption="📈 Flugverkehr der Woche",
             )

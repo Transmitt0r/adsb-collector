@@ -19,6 +19,7 @@ from squawk.db import create_pool
 from squawk.digest import _GeminiDigestClient, generate_digest
 from squawk.enrichment import _GeminiScoringClient
 from squawk.pipeline import run_pipeline
+from squawk.queries.charts import ChartQuery
 from squawk.queries.digest import DigestQuery
 from squawk.repositories.digest import DigestRepository
 from squawk.repositories.enrichment import EnrichmentRepository
@@ -43,8 +44,9 @@ async def main() -> None:
     digest_repo = DigestRepository(pool)
     user_repo = UserRepository(pool)
 
-    # Read query
+    # Read queries
     digest_query = DigestQuery(pool)
+    chart_query = ChartQuery(pool)
 
     async with aiohttp.ClientSession() as http:
         # HTTP clients
@@ -66,6 +68,7 @@ async def main() -> None:
         ) -> None:
             await generate_digest(
                 query=digest_query,
+                chart_query=chart_query,
                 digest_repo=digest_repo,
                 photo_client=photo_client,
                 digest_client=digest_client,
@@ -120,5 +123,9 @@ async def main() -> None:
             scheduler.shutdown()
 
 
-if __name__ == "__main__":
+def run() -> None:
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()

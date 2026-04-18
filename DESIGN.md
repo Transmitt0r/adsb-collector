@@ -715,10 +715,10 @@ functions. Delete the event bus infrastructure.
 
 ### Phase 8 — Deployment
 
-- [ ] **8.1** Write `Dockerfile` (single, repo root)
-- [ ] **8.2** Update `docker-compose.yml`: replace `collector` and `bot` services
+- [x] **8.1** Write `Dockerfile` (single, repo root)
+- [x] **8.2** Update `docker-compose.yml`: replace `collector` and `bot` services
       with single `squawk` service
-- [ ] **8.3** Smoke test on local Docker Compose: start service, send `/start`,
+- [x] **8.3** Smoke test on local Docker Compose: start service, send `/start`,
       trigger `/debug`, confirm digest arrives
 
 ### Phase 9 — Cutover

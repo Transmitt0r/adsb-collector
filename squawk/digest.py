@@ -17,7 +17,9 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
 from pydantic import BaseModel
 
+from squawk.charts import render_traffic_chart
 from squawk.clients.planespotters import PhotoClient, PhotoInfo
+from squawk.queries.charts import ChartQuery
 from squawk.queries.digest import DigestQuery
 
 if TYPE_CHECKING:
@@ -49,6 +51,9 @@ FORMAT (Telegram HTML, KEIN Markdown):
   - unter 0,3 nm → "direkt über uns"
   - 0,3–1 nm → "nur ~X km entfernt"
 - Bei exotischen Zielen (außerhalb Mitteleuropas): kurze Klammerbemerkung
+- WICHTIG: Verwende doppelte Zeilenumbrüche (\\n\\n) zwischen allen Absätzen und
+  Abschnitten. Jeder Abschnitt muss mit \\n\\n vom vorherigen getrennt sein.
+  Auch innerhalb von Abschnitten: ein Zeilenumbruch (\\n) nach jedem Satz-Block.
 
 STRUKTUR — genau diese vier Abschnitte:
 
@@ -126,7 +131,7 @@ class _GeminiDigestClient:
     converts the result to a frozen DigestOutput dataclass.
     """
 
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash") -> None:
+    def __init__(self, api_key: str, model: str = "gemini-3-flash-preview") -> None:
         os.environ.setdefault("GOOGLE_API_KEY", api_key)
         self._model = model
 
@@ -205,6 +210,7 @@ class _GeminiDigestClient:
 
 async def generate_digest(
     query: DigestQuery,
+    chart_query: ChartQuery,
     digest_repo: DigestRepository,
     photo_client: PhotoClient,
     digest_client: DigestClient,
@@ -219,8 +225,9 @@ async def generate_digest(
     2. Fetch candidates + stats via DigestQuery.
     3. Fetch photos for top candidates.
     4. Call digest_client.generate() — one Gemini call.
-    5. Cache result via digest_repo.
-    6. Broadcast to all active users via broadcaster.
+    5. Generate traffic chart.
+    6. Cache result via digest_repo.
+    7. Broadcast to all active users via broadcaster.
     """
     n_days = (period_end - period_start).days
     reference_date = period_end.date()
@@ -241,7 +248,8 @@ async def generate_digest(
                 n_days,
             )
             try:
-                await broadcaster.broadcast(cached)
+                chart_png = await _generate_chart(chart_query, n_days)
+                await broadcaster.broadcast(cached, chart_png)
             except Exception:
                 logger.exception("generate_digest: broadcast of cached digest failed")
             return
@@ -280,6 +288,9 @@ async def generate_digest(
         logger.exception("generate_digest: generation failed; skipping")
         return
 
+    # Generate traffic chart.
+    chart_png = await _generate_chart(chart_query, n_days)
+
     # Cache the result.
     try:
         await digest_repo.cache(reference_date, n_days, digest)
@@ -288,6 +299,16 @@ async def generate_digest(
 
     # Broadcast.
     try:
-        await broadcaster.broadcast(digest)
+        await broadcaster.broadcast(digest, chart_png)
     except Exception:
         logger.exception("generate_digest: broadcast failed")
+
+
+async def _generate_chart(chart_query: ChartQuery, n_days: int) -> bytes | None:
+    try:
+        daily = await chart_query.get_daily(n_days)
+        hourly = await chart_query.get_hourly(n_days)
+        return render_traffic_chart(daily, hourly)
+    except Exception:
+        logger.exception("generate_digest: chart generation failed")
+        return None
