@@ -1,0 +1,7 @@
+# Ruff config for libs/ packages.
+# Extends the root config and adds the invariant: libs/ may not import from squawk.
+# Rule TID251 fires on any "import squawk" or "from squawk import ..." statement.
+extend = "../pyproject.toml"
+
+[lint.flake8-tidy-imports]
+banned-module-level-imports = ["squawk"]

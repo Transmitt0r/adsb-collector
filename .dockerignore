@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+.venv
+.pytest_cache
+.ruff_cache
+bot/
+collector/
+feeder/
+scripts/
+*.md
+LICENSE
+flake.nix
+flake.lock
+.pre-commit-config.yaml

@@ -2,10 +2,10 @@ name: Build & Push
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
-  build-collector:
+  build-squawk:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,43 +24,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push collector
+      - name: Build and push squawk
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: collector/Dockerfile
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/transmitt0r/squawk/collector:latest
-          cache-from: type=gha,scope=collector
-          cache-to: type=gha,mode=max,scope=collector
-
-  build-bot:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push bot
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: bot/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/transmitt0r/squawk/bot:latest
-          cache-from: type=gha,scope=bot
-          cache-to: type=gha,mode=max,scope=bot
+          tags: ghcr.io/transmitt0r/squawk/squawk:latest
+          cache-from: type=gha,scope=squawk
+          cache-to: type=gha,mode=max,scope=squawk
