@@ -17,7 +17,7 @@ import asyncpg
 import pytest
 from testcontainers.postgres import PostgresContainer
 
-from squawk.actors.digest import DigestOutput
+from squawk.digest import DigestOutput
 from squawk.repositories.digest import DigestRepository
 
 TIMESCALE_IMAGE = "timescale/timescaledb:latest-pg16"

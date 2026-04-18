@@ -13,7 +13,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application
 
-from squawk.actors.digest import DigestOutput
+from squawk.digest import DigestOutput
 from squawk.repositories.users import UserRepository
 
 logger = logging.getLogger(__name__)

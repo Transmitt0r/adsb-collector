@@ -26,7 +26,7 @@ import datetime
 
 import asyncpg
 
-from squawk.actors.digest import DigestOutput
+from squawk.digest import DigestOutput
 
 
 class DigestRepository:

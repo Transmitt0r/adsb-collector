@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Callable, Coroutine
 
 from telegram.ext import Application, CommandHandler
 
-from eventbus import EventBus
 from squawk.bot.handlers import make_handlers
 from squawk.repositories.users import UserRepository
 
@@ -29,16 +29,18 @@ class TelegramBot:
         self,
         app: Application,
         users: UserRepository,
-        bus: EventBus,
+        on_debug_digest: Callable[[], Coroutine],
         admin_chat_id: int,
     ) -> None:
         self._app = app
         self._users = users
-        self._bus = bus
+        self._on_debug_digest = on_debug_digest
         self._admin_chat_id = admin_chat_id
 
     def _register_handlers(self) -> None:
-        handlers = make_handlers(self._users, self._bus, self._admin_chat_id)
+        handlers = make_handlers(
+            self._users, self._on_debug_digest, self._admin_chat_id
+        )
         for command, handler in handlers.items():
             self._app.add_handler(CommandHandler(command, handler))
 

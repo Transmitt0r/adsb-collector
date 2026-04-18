@@ -6,14 +6,13 @@ receives the bot's dependencies via closure — no global state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from typing import Callable, Coroutine
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from eventbus import EventBus
-from squawk.events import DigestRequested
 from squawk.repositories.users import UserRepository
 
 logger = logging.getLogger(__name__)
@@ -21,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def make_handlers(
     users: UserRepository,
-    bus: EventBus,
+    on_debug_digest: Callable[[], Coroutine],
     admin_chat_id: int,
 ) -> dict[str, any]:
     """Return a dict of {command: handler_coroutine} for registration on PTB."""
@@ -58,14 +57,7 @@ def make_handlers(
         if chat_id != admin_chat_id:
             await update.message.reply_text("Nicht autorisiert.")
             return
-        now = datetime.now(tz=timezone.utc)
-        await bus.emit(
-            DigestRequested(
-                period_start=now - timedelta(hours=24),
-                period_end=now,
-                force=True,
-            )
-        )
+        asyncio.create_task(on_debug_digest())
         await update.message.reply_text("Digest wird generiert…")
 
     return {"start": start, "stop": stop, "debug": debug}
