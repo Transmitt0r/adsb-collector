@@ -105,7 +105,7 @@ class TestRoutesClient:
                 await RoutesClient(session, max_retries=3).lookup("BA456")
 
     async def test_empty_flightroute_returns_none(self) -> None:
-        body = {"response": {"flightroute": {}}}
+        body: dict = {"response": {"flightroute": {}}}
         session = _mock_session([(200, body)])
         assert await RoutesClient(session, max_retries=3).lookup("XX999") is None
 

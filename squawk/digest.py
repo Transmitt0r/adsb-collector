@@ -184,9 +184,10 @@ class _GeminiDigestClient:
             user_id="digest_job", session_id=session_id, new_message=message
         ):
             if event.is_final_response() and event.content and event.content.parts:
-                result = _DigestOutputModel.model_validate_json(
-                    event.content.parts[0].text
-                )
+                text = event.content.parts[0].text
+                if text is None:
+                    continue
+                result = _DigestOutputModel.model_validate_json(text)
                 logger.info(
                     "digest client: digest generated (%d chars, photo=%s)",
                     len(result.text),

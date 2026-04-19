@@ -115,7 +115,7 @@ class _MockScoringClient:
 
     async def score_batch(
         self,
-        aircraft: list[tuple[str, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[str, str | None, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         self.calls.append(aircraft)
         return [

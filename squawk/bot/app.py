@@ -48,6 +48,7 @@ class TelegramBot:
         self._register_handlers()
         await self._app.initialize()
         await self._app.start()
+        assert self._app.updater is not None
         await self._app.updater.start_polling()
         logger.info("telegram bot started")
         try:
@@ -55,6 +56,7 @@ class TelegramBot:
             await asyncio.get_event_loop().create_future()
         finally:
             logger.info("telegram bot shutting down")
-            await self._app.updater.stop()
+            if self._app.updater:
+                await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()

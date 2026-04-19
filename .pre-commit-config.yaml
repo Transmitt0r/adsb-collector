@@ -13,6 +13,13 @@ repos:
         entry: ruff check --fix
         types: [python]
 
+      - id: mypy
+        name: mypy
+        language: system
+        entry: uv run mypy squawk libs db
+        pass_filenames: false
+        files: ^(squawk|libs|db)/
+
       - id: pytest-squawk
         name: pytest (squawk)
         language: system

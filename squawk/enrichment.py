@@ -63,7 +63,7 @@ class ScoreResult:
 class ScoringClient(Protocol):
     async def score_batch(
         self,
-        aircraft: list[tuple[str, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[str, str | None, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]: ...
 
 
@@ -91,17 +91,23 @@ _FALLBACK_SCORE = ScoreResult(score=1, tags=[], annotation="")
 
 def _aircraft_to_dict(
     hex_: str,
+    callsign: str | None,
     info: AircraftInfo | None,
     route: RouteInfo | None,
 ) -> dict:
     return {
         "hex": hex_,
+        "callsign": callsign,
         "registration": info.registration if info else None,
         "type": info.type if info else None,
         "operator": info.operator if info else None,
         "flag": info.flag if info else None,
+        "origin_iata": route.origin_iata if route else None,
+        "origin_icao": route.origin_icao if route else None,
         "origin_city": route.origin_city if route else None,
         "origin_country": route.origin_country if route else None,
+        "dest_iata": route.dest_iata if route else None,
+        "dest_icao": route.dest_icao if route else None,
         "dest_city": route.dest_city if route else None,
         "dest_country": route.dest_country if route else None,
     }
@@ -122,7 +128,7 @@ class _GeminiScoringClient:
 
     async def score_batch(
         self,
-        aircraft: list[tuple[str, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[str, str | None, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         if not aircraft:
             return []
@@ -130,12 +136,14 @@ class _GeminiScoringClient:
         # Deduplicate by hex — same hex appearing twice in the batch window is
         # processed once; the duplicate gets the same ScoreResult.
         seen: dict[str, int] = {}
-        deduped: list[tuple[str, AircraftInfo | None, RouteInfo | None]] = []
+        deduped: list[
+            tuple[str, str | None, AircraftInfo | None, RouteInfo | None]
+        ] = []
         index_map: list[int] = []
-        for hex_, info, route in aircraft:
+        for hex_, callsign, info, route in aircraft:
             if hex_ not in seen:
                 seen[hex_] = len(deduped)
-                deduped.append((hex_, info, route))
+                deduped.append((hex_, callsign, info, route))
             index_map.append(seen[hex_])
 
         scores = await self._score_deduped(deduped)
@@ -143,9 +151,9 @@ class _GeminiScoringClient:
 
     async def _score_deduped(
         self,
-        aircraft: list[tuple[str, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[str, str | None, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
-        input_dicts = [_aircraft_to_dict(h, i, r) for h, i, r in aircraft]
+        input_dicts = [_aircraft_to_dict(h, c, i, r) for h, c, i, r in aircraft]
         user_text = "Aircraft:\n" + json.dumps(
             input_dicts, ensure_ascii=False, indent=2
         )
@@ -174,9 +182,10 @@ class _GeminiScoringClient:
                 user_id="enrichment", session_id=session_id, new_message=message
             ):
                 if event.is_final_response() and event.content and event.content.parts:
-                    batch = _ScoreBatchModel.model_validate_json(
-                        event.content.parts[0].text
-                    )
+                    text = event.content.parts[0].text
+                    if text is None:
+                        continue
+                    batch = _ScoreBatchModel.model_validate_json(text)
                     if len(batch.results) != len(aircraft):
                         logger.warning(
                             "score_batch: length mismatch — expected %d got %d; "
@@ -205,12 +214,12 @@ class _GeminiScoringClient:
 
     async def _fallback(
         self,
-        aircraft: list[tuple[str, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[str, str | None, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         """Score each aircraft individually. Returns _FALLBACK_SCORE on failure."""
         results: list[ScoreResult] = []
-        for hex_, info, route in aircraft:
-            input_dicts = [_aircraft_to_dict(hex_, info, route)]
+        for hex_, callsign, info, route in aircraft:
+            input_dicts = [_aircraft_to_dict(hex_, callsign, info, route)]
             user_text = "Aircraft:\n" + json.dumps(input_dicts, ensure_ascii=False)
 
             agent = LlmAgent(
@@ -244,9 +253,10 @@ class _GeminiScoringClient:
                         and event.content
                         and event.content.parts
                     ):
-                        batch = _ScoreBatchModel.model_validate_json(
-                            event.content.parts[0].text
-                        )
+                        text = event.content.parts[0].text
+                        if text is None:
+                            continue
+                        batch = _ScoreBatchModel.model_validate_json(text)
                         if batch.results:
                             r = batch.results[0]
                             score = ScoreResult(
@@ -302,7 +312,7 @@ async def enrich_batch(
         await asyncio.gather(*[_fetch_route(route_client, c) for c in callsigns])
     )
 
-    scoring_input = list(zip(hexes, aircraft_infos, route_infos))
+    scoring_input = list(zip(hexes, callsigns, aircraft_infos, route_infos))
 
     try:
         scores = await scoring_client.score_batch(scoring_input)

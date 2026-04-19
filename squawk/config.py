@@ -25,7 +25,7 @@ class Config:
     # Optional with defaults
     poll_interval: float = 5.0
     session_timeout: float = 300.0
-    digest_schedule: str = "0 8 * * 0"
+    digest_schedule: str = "0 8 * * 6"
     enrichment_ttl: timedelta = field(default_factory=lambda: timedelta(days=30))
     enrichment_batch_size: int = 20
     enrichment_flush_interval: float = 30.0

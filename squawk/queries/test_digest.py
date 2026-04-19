@@ -248,7 +248,9 @@ async def test_get_candidates_ranked_by_story_score(
 
     result = await query.get_candidates(days=7)
     scores = [r.story_score for r in result]
-    assert scores == sorted(scores, reverse=True)
+    assert scores == sorted(
+        scores, key=lambda s: s if s is not None else -1, reverse=True
+    )
     assert scores[0] == 9
 
 
