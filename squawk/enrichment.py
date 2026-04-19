@@ -294,6 +294,7 @@ async def enrich_batch(
     if not items:
         return
 
+    logger.info("enrich_batch: scoring %d aircraft", len(items))
     hexes = [hex_ for hex_, _ in items]
     callsigns = [callsign for _, callsign in items]
 

@@ -29,6 +29,7 @@ def make_handlers(
         if chat_id != admin_chat_id:
             await update.message.reply_text("Nicht autorisiert.")
             return
+        logger.info("bot: /debug triggered by chat_id=%d", chat_id)
         asyncio.create_task(on_debug_digest(chat_id))
         await update.message.reply_text("Digest wird generiert…")
 

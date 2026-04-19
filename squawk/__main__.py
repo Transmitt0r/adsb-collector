@@ -30,6 +30,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
+# Silence noisy third-party loggers — only keep warnings and errors.
+for _noisy in ("httpx", "google_adk", "google_genai", "apscheduler", "telegram"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
