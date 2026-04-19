@@ -9,6 +9,90 @@ A self-hosted system for historizing ADS-B flight data from a FlightRadar24 feed
 | Squawk | `squawk/` | Polls Pi every 5s, writes sightings to TimescaleDB, weekly Telegram digest |
 | Feeder | `feeder/` | readsb + tar1090 + fr24feed on the Pi |
 
+## Architecture
+
+```
+                        ┌──────────────────────────────────────────────┐
+                        │                squawk service                │
+                        │                                              │
+  tar1090 ──────────────► run_pipeline()                               │
+                        │   ├─ record sightings (SightingRepository)   │
+                        │   └─ enrich_batch()  (EnrichmentRepository)  │
+                        │                                              │
+                        │ Scheduler ──► generate_digest()              │
+                        │ /debug    ──┘      │                         │
+                        │                    ├─ DigestQuery             │
+                        │                    ├─ DigestRepository        │
+                        │                    ├─ ChartQuery              │
+                        │                    └─ Broadcaster ──► Telegram│
+                        │                                              │
+                        │ TelegramBot: /start /stop /debug             │
+                        └──────────────────────────────────────────────┘
+                                          │
+                                     TimescaleDB
+```
+
+Two async tasks run in an `asyncio.TaskGroup`:
+
+1. **Pipeline** (`run_pipeline`): continuous loop — polls tar1090, records sightings,
+   batches new/expired aircraft, enriches them via Gemini, stores results.
+2. **Bot** (`TelegramBot.run`): handles `/start`, `/stop`, `/debug`. The scheduler
+   triggers `generate_digest` weekly; `/debug` triggers it on demand.
+
+### Repository Layout
+
+```
+squawk/
+  __main__.py               ← wiring only: construct everything, start TaskGroup
+  config.py                 ← all env vars in one frozen dataclass
+  db.py                     ← asyncpg pool creation
+  scheduler.py              ← Scheduler protocol + APSchedulerBackend
+  pipeline.py               ← run_pipeline(): polling loop + enrichment batching
+  enrichment.py             ← ScoringClient protocol, enrich_batch(), ADK impl
+  digest.py                 ← DigestClient protocol, generate_digest(), ADK impl
+  charts.py                 ← matplotlib traffic charts for digests
+
+  clients/                  ← typed HTTP clients, each behind a Protocol
+    adsbdb.py               ← AircraftInfo, AircraftLookupClient
+    planespotters.py        ← PhotoInfo, PhotoClient
+    routes.py               ← RouteInfo, RouteClient
+
+  repositories/             ← write repositories, one per table-owner
+    sightings.py            ← SightingRepository (aircraft, sightings, position_updates)
+    enrichment.py           ← EnrichmentRepository (enriched_aircraft, callsign_routes)
+    digest.py               ← DigestRepository (digests)
+    users.py                ← UserRepository (users)
+
+  queries/                  ← read-only, cross-table
+    digest.py               ← DigestQuery (joins sightings + enriched_aircraft)
+    charts.py               ← ChartQuery (daily/hourly traffic counts)
+
+  bot/
+    app.py                  ← TelegramBot: PTB wiring, command registration, run()
+    handlers.py             ← /start /stop /debug command handlers
+    broadcaster.py          ← Broadcaster protocol + TelegramBroadcaster
+
+libs/
+  tar1090/                  ← pure package: polls tar1090 HTTP API
+```
+
+### Table Ownership
+
+Each repository owns specific tables for writes. Cross-table reads go through
+query objects.
+
+```
+Table                  Writer                    Read by
+──────────────────────────────────────────────────────────────────────
+aircraft               SightingRepository        DigestQuery
+sightings              SightingRepository        DigestQuery, ChartQuery
+position_updates       SightingRepository        DigestQuery
+enriched_aircraft      EnrichmentRepository      DigestQuery, run_pipeline (expiry)
+callsign_routes        EnrichmentRepository      DigestQuery
+digests                DigestRepository          —
+users                  UserRepository            —
+```
+
 ## Infrastructure
 
 - **Pi:** `tracker@flighttracker.local` — runs the feeder stack
@@ -39,7 +123,7 @@ Key fields per aircraft:
 
 ## Database Schema
 
-Six tables in TimescaleDB:
+Seven tables in TimescaleDB:
 
 - **`aircraft`** — registry, one row per unique ICAO hex
 - **`sightings`** — one row per continuous observation session (start/end time, altitude/distance aggregates, callsign)
@@ -47,6 +131,7 @@ Six tables in TimescaleDB:
 - **`enriched_aircraft`** — AI scores, annotations, registration data per aircraft (TTL-based expiry)
 - **`callsign_routes`** — origin/destination per flight callsign
 - **`digests`** — cached weekly digests
+- **`users`** — Telegram chat IDs for digest broadcast
 
 ## Deployment
 

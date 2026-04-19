@@ -1,6 +1,6 @@
 """DigestRepository — owns the digests table.
 
-Written by DigestActor only. Caches generated digest text keyed by
+Written by generate_digest() only. Caches generated digest text keyed by
 (reference_date, n_days) to avoid regenerating the same digest on restart.
 
 Cache semantics

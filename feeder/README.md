@@ -26,4 +26,4 @@ Set these in Coolify:
 Deploy as a Docker Compose application in Coolify, pointed at the Pi as a remote server,
 with compose file path set to `feeder/docker-compose.yml`.
 
-tar1090 web UI: `http://flighttracker.local:8080`
+tar1090 web UI: `http://flighttracker.local:8082`

@@ -1,19 +1,14 @@
 """EnrichmentRepository — owns enriched_aircraft and callsign_routes tables.
 
-Written by EnrichmentActor only. No other actor may write to these tables.
-PollingActor has read-only access via get_expired().
+Written by enrich_batch() only. No other module may write to these tables.
+run_pipeline() has read-only access via get_expired().
 
 Idempotency contract
 --------------------
 ``store`` uses upserts on both tables:
 
-* enriched_aircraft: ``ON CONFLICT (hex) DO UPDATE`` — idempotent on replay.
-* callsign_routes: ``ON CONFLICT (callsign) DO UPDATE`` — idempotent on replay.
-
-Replaying the same EnrichmentExpired or HexFirstSeen event after a crash
-produces the same final DB state. The only observable difference is that
-``expires_at`` is recomputed from ``now()`` at store time — for a crash replay
-within seconds, this is negligible.
+* enriched_aircraft: ``ON CONFLICT (hex) DO UPDATE`` — idempotent.
+* callsign_routes: ``ON CONFLICT (callsign) DO UPDATE`` — idempotent.
 """
 
 from __future__ import annotations
@@ -29,8 +24,8 @@ from squawk.clients.routes import RouteInfo
 class EnrichmentRepository:
     """Write repository for enriched_aircraft and callsign_routes.
 
-    All methods are safe to call concurrently from a single asyncio task
-    (EnrichmentActor.run). They are not designed for concurrent multi-task access.
+    All methods are safe to call concurrently from a single asyncio task.
+    They are not designed for concurrent multi-task access.
     """
 
     def __init__(self, pool: asyncpg.Pool) -> None:

@@ -1,6 +1,6 @@
 """Broadcaster protocol and TelegramBroadcaster implementation.
 
-DigestActor receives a Broadcaster — it does not import Telegram directly.
+generate_digest() receives a Broadcaster — it does not import Telegram directly.
 TelegramBroadcaster is the only concrete implementation.
 """
 

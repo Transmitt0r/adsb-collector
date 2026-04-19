@@ -4,10 +4,7 @@
 .venv
 .pytest_cache
 .ruff_cache
-bot/
-collector/
 feeder/
-scripts/
 *.md
 LICENSE
 flake.nix

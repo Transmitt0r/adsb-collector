@@ -1,5 +1,3 @@
-@README.md
-
 ## Repo Structure
 
 Two components:
@@ -8,8 +6,6 @@ Two components:
 |-----------|----------|---------|---------|
 | Squawk | `squawk/` | NAS (Coolify) | Polls Pi, writes to TimescaleDB, weekly Telegram digest |
 | Feeder | `feeder/` | Pi (Coolify) | readsb + tar1090 + fr24feed in Docker |
-
-See `feeder/CLAUDE.md` for feeder details. Squawk architecture is documented in `DESIGN.md`.
 
 ## Dev Environment
 
@@ -62,5 +58,3 @@ through google-adk.
 
 Managed by dbmate. Migration files in `db/migrations/`. The entrypoint (`entrypoint.sh`)
 runs `dbmate up` on startup.
-
-For cutover from v1, see `db/cutover_v1_to_squawk.sql`.

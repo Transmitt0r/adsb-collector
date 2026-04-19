@@ -1,6 +1,6 @@
 """DigestQuery — read-only cross-table queries for digest generation.
 
-Used exclusively by DigestActor. May join any table; owns no tables.
+Used exclusively by generate_digest(). May join any table; owns no tables.
 
 DigestCandidate holds the per-aircraft data needed to generate a digest:
 enrichment metadata, sighting aggregates, and route information joined

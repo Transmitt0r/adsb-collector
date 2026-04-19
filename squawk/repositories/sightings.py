@@ -1,6 +1,6 @@
 """SightingRepository — owns aircraft, sightings, position_updates tables.
 
-Written by PollingActor only. No other actor may write to these tables.
+Written by run_pipeline() only. No other module may write to these tables.
 
 Idempotency contract
 --------------------
