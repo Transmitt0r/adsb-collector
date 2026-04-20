@@ -67,6 +67,8 @@ class DigestStats:
     new_aircraft: int
     peak_hour: int | None  # local hour (Europe/Berlin) with most sightings
     peak_count: int | None  # number of sightings in peak_hour
+    medical_count: int = 0  # unique aircraft tagged "medical" seen this period
+    police_count: int = 0  # unique aircraft tagged "police" seen this period
     squawk_alerts: list[SquawkAlert] = field(default_factory=list)
 
 
@@ -212,6 +214,22 @@ class DigestQuery:
                 list(_SQUAWK_MEANINGS.keys()),
             )
 
+            tag_counts_row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(DISTINCT s.hex) FILTER (
+                        WHERE 'medical' = ANY(ea.story_tags)
+                    ) AS medical_count,
+                    COUNT(DISTINCT s.hex) FILTER (
+                        WHERE 'police' = ANY(ea.story_tags)
+                    ) AS police_count
+                FROM sightings s
+                JOIN enriched_aircraft ea ON ea.hex = s.hex
+                WHERE s.started_at > now() - $1 * interval '1 day'
+                """,
+                days,
+            )
+
         squawk_alerts = [
             SquawkAlert(
                 time_local=row["time_local"].strftime("%a %H:%M"),
@@ -228,5 +246,7 @@ class DigestQuery:
             new_aircraft=new_row["new_aircraft"],
             peak_hour=peak_row["hr"] if peak_row else None,
             peak_count=peak_row["cnt"] if peak_row else None,
+            medical_count=tag_counts_row["medical_count"] if tag_counts_row else 0,
+            police_count=tag_counts_row["police_count"] if tag_counts_row else 0,
             squawk_alerts=squawk_alerts,
         )

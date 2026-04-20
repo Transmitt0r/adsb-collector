@@ -76,6 +76,9 @@ Genau diese Zeilen mit echten Daten:
 🆕 Erstbesucher: <new_aircraft>
 📏 Weiteste Annäherung: <callsign>, <distance km>
 ⛰️ Höchster Flug: <callsign oder Reg>, <altitude m>
+Nur wenn > 0 anzeigen (je eigene Zeile):
+🏥 Sanitätsflüge: <medical_count>
+🚔 Polizeiflüge: <police_count>
 
 Falls ein Notfall-Squawk vorhanden: mache ihn zur Eröffnungsgeschichte der Highlights.
 Falls ein Kandidat ein photo-Objekt hat: verwende photo_url für das Ausgabefeld und
