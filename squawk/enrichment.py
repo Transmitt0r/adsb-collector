@@ -36,36 +36,40 @@ Score guidelines:
 - 9–10: Very rare or extraordinary (historic aircraft, emergency squawk,
         medical evacuation, VIP transport)
 
-IMPORTANT rules:
-1. Squawk 7500 (hijack), 7600 (radio failure), 7700 (emergency) → score ≥ 9.
-2. Plausibility check: if the observed altitude (alt_baro_ft) or speed (gs_knots)
-   is physically inconsistent with the claimed aircraft type, the database data is
-   wrong — score based on actual observed behavior, not the claimed type. Examples:
-   helicopters do not exceed ~20,000 ft; piston/turboprop GA aircraft rarely exceed
-   25,000 ft; WWII-era types (DC-3, Catalina) cannot cruise above 24,000 ft at
-   jet speeds.
-3. No hallucination: if type, registration, and operator are all null/unknown, do
-   NOT guess or infer the aircraft type from the hex code or any other source.
-   Score ≤ 4 unless the callsign or squawk provides clear evidence of something
-   unusual.
+Data sources — each aircraft has up to three database entries:
+- bulk_db: mictronics.de daily export from government aircraft registries.
+  Most authoritative for registration and icao_type. Has no operator data.
+- hexdb: hexdb.io, also from government registries. Reliable when present.
+- adsbdb: community-maintained ADSB-DB. Has rich human-readable type descriptions
+  but can be wrong. If it contradicts bulk_db or hexdb on registration or icao_type,
+  prefer the registry sources.
 
-Input fields:
-- hex, callsign, registration, operator, flag: identity data
-- type: human-readable aircraft type from database (may be wrong — apply rule 2)
-- icao_type: ICAO type designator (e.g. B38M, A21N, H145) — more reliable than type
-- alt_baro_ft: observed barometric altitude in feet (ground truth)
-- gs_knots: observed ground speed in knots (ground truth)
-- squawk: transponder squawk code
-- origin/dest fields: route information
+Conflict resolution rules:
+1. Telemetry always wins for plausibility: alt_baro_ft and gs_knots are ground
+   truth. An aircraft flying at 39,000 ft at 450 kt is not a seaplane or WWII
+   piston aircraft, regardless of what any database says.
+2. Registry sources (bulk_db, hexdb) beat adsbdb for registration and ICAO type.
+   If adsbdb says "Douglas DC-3" but bulk_db icao_type says "A320", trust A320.
+3. Agreement across sources increases confidence. If all three agree on
+   registration, treat it as certain.
+4. Squawk 7500 (hijack), 7600 (radio failure), 7700 (emergency) → score ≥ 9.
+5. No hallucination: if all sources return null for type/registration/operator,
+   do NOT infer aircraft identity from the hex code. Score ≤ 4 unless the
+   callsign or squawk provides clear evidence of something unusual.
 
-tags: short English keywords (e.g. "military", "cargo", "bizjet",
-      "emergency", "long-haul", "low-altitude", "unusual-operator")
+Input fields per aircraft:
+- hex, callsign: ADS-B identity
+- alt_baro_ft, gs_knots, squawk: live telemetry (ground truth)
+- bulk_db, hexdb, adsbdb: registry data objects (null if source had no entry),
+  each with: registration, icao_type, type (human-readable), operator, flag
+- origin/dest fields: route information from a separate route database
 
-annotation: a single English sentence explaining why the aircraft is interesting.
-Leave empty ("") if unremarkable (score ≤ 3).
+Output fields:
+- tags: short English keywords (e.g. "military", "cargo", "bizjet",
+  "emergency", "long-haul", "unusual-operator")
+- annotation: one English sentence explaining why interesting; "" if score ≤ 3
 
-The output is a JSON object with a field "results" containing an array with exactly
-as many entries as the input list — in the same order.
+Return a JSON object with "results" — an array in the same order as the input.
 """.strip()
 
 
@@ -86,6 +90,19 @@ class EnrichItem:
 
 
 @dataclass(frozen=True)
+class AircraftSources:
+    """Raw per-source aircraft info passed to the scoring AI.
+
+    Keeping sources separate lets the AI reason about source reliability and
+    conflicts rather than receiving a silently pre-merged record.
+    """
+
+    bulk: AircraftInfo | None  # mictronics.de — government registries, most reliable
+    hexdb: AircraftInfo | None  # hexdb.io — government registries
+    adsbdb: AircraftInfo | None  # ADSB-DB — community-maintained, can be wrong
+
+
+@dataclass(frozen=True)
 class ScoreResult:
     score: int  # 1–10
     tags: list[str]
@@ -95,7 +112,7 @@ class ScoreResult:
 class ScoringClient(Protocol):
     async def score_batch(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
     ) -> list[ScoreResult]: ...
 
 
@@ -121,9 +138,21 @@ class _ScoreBatchModel(BaseModel):
 _FALLBACK_SCORE = ScoreResult(score=1, tags=[], annotation="")
 
 
+def _info_to_dict(info: AircraftInfo | None) -> dict | None:
+    if info is None:
+        return None
+    return {
+        "registration": info.registration,
+        "icao_type": info.icao_type,
+        "type": info.type,
+        "operator": info.operator,
+        "flag": info.flag,
+    }
+
+
 def _aircraft_to_dict(
     item: EnrichItem,
-    info: AircraftInfo | None,
+    sources: AircraftSources,
     route: RouteInfo | None,
 ) -> dict:
     return {
@@ -132,11 +161,9 @@ def _aircraft_to_dict(
         "alt_baro_ft": item.alt_baro,
         "gs_knots": item.gs,
         "squawk": item.squawk,
-        "registration": info.registration if info else None,
-        "type": info.type if info else None,
-        "icao_type": info.icao_type if info else None,
-        "operator": info.operator if info else None,
-        "flag": info.flag if info else None,
+        "bulk_db": _info_to_dict(sources.bulk),
+        "hexdb": _info_to_dict(sources.hexdb),
+        "adsbdb": _info_to_dict(sources.adsbdb),
         "origin_iata": route.origin_iata if route else None,
         "origin_icao": route.origin_icao if route else None,
         "origin_city": route.origin_city if route else None,
@@ -156,19 +183,19 @@ class _GeminiScoringClient:
 
     async def score_batch(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
     ) -> list[ScoreResult]:
         if not aircraft:
             return []
 
         # Deduplicate by hex
         seen: dict[str, int] = {}
-        deduped: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]] = []
+        deduped: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]] = []
         index_map: list[int] = []
-        for item, info, route in aircraft:
+        for item, sources, route in aircraft:
             if item.hex not in seen:
                 seen[item.hex] = len(deduped)
-                deduped.append((item, info, route))
+                deduped.append((item, sources, route))
             index_map.append(seen[item.hex])
 
         scores = await self._score_deduped(deduped)
@@ -176,10 +203,10 @@ class _GeminiScoringClient:
 
     async def _score_deduped(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
     ) -> list[ScoreResult]:
         input_dicts = [
-            _aircraft_to_dict(item, info, route) for item, info, route in aircraft
+            _aircraft_to_dict(item, sources, route) for item, sources, route in aircraft
         ]
         user_text = "Aircraft:\n" + json.dumps(
             input_dicts, ensure_ascii=False, indent=2
@@ -241,11 +268,11 @@ class _GeminiScoringClient:
 
     async def _fallback(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
     ) -> list[ScoreResult]:
         results: list[ScoreResult] = []
-        for item, info, route in aircraft:
-            input_dicts = [_aircraft_to_dict(item, info, route)]
+        for item, sources, route in aircraft:
+            input_dicts = [_aircraft_to_dict(item, sources, route)]
             user_text = "Aircraft:\n" + json.dumps(input_dicts, ensure_ascii=False)
 
             agent = LlmAgent(
@@ -393,14 +420,19 @@ async def enrich_batch(
         asyncio.gather(*[_fetch_route(route_client, i.callsign) for i in items]),
     )
 
-    merged_infos = [
-        _merge_aircraft_info(bulk, hexdb, adsbdb)
+    # Build per-source objects for the AI (raw, unmerged — lets it reason about
+    # source reliability and conflicts) and merged info for storage.
+    sources_list = [
+        AircraftSources(bulk=bulk, hexdb=hexdb, adsbdb=adsbdb)
         for bulk, hexdb, adsbdb in zip(bulk_infos, hexdb_infos, adsbdb_infos)
+    ]
+    merged_infos = [
+        _merge_aircraft_info(s.bulk, s.hexdb, s.adsbdb) for s in sources_list
     ]
 
     scoring_input = [
-        (item, info, route)
-        for item, info, route in zip(items, merged_infos, route_infos)
+        (item, sources, route)
+        for item, sources, route in zip(items, sources_list, route_infos)
     ]
 
     try:

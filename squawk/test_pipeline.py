@@ -21,7 +21,7 @@ from testcontainers.postgres import PostgresContainer
 
 from squawk.clients.adsbdb import AircraftInfo
 from squawk.clients.routes import RouteInfo
-from squawk.enrichment import EnrichItem, ScoreResult
+from squawk.enrichment import AircraftSources, EnrichItem, ScoreResult
 from squawk.pipeline import run_pipeline
 from squawk.repositories.enrichment import EnrichmentRepository
 from squawk.repositories.sightings import SightingRepository
@@ -115,7 +115,7 @@ class _MockScoringClient:
 
     async def score_batch(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
     ) -> list[ScoreResult]:
         self.calls.append(aircraft)
         return [
