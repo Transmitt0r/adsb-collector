@@ -1,43 +1,33 @@
-"""adsbdb aircraft registry client.
+"""hexdb.io aircraft registry client.
 
 Public API:
-    AircraftInfo       — frozen dataclass with registration, type, operator, flag
-    AircraftLookupClient — Protocol
-    AdsbbClient        — concrete implementation
+    HexdbClient — concrete AircraftLookupClient implementation
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from typing import Protocol
 
 import aiohttp
+
+from squawk.clients.adsbdb import AircraftInfo
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
-@dataclass(frozen=True)
-class AircraftInfo:
-    registration: str | None
-    type: str | None
-    operator: str | None
-    flag: str | None
-    # Optional fields populated by hexdb.io / ADSBx bulk DB
-    icao_type: str | None = None  # ICAO type designator, e.g. "B38M", "A21N"
-    short_type: str | None = None  # ADSBx category, e.g. "L2J", "H1T"
-    mil: bool | None = None  # Military flag from ADSBx
-
-
 class AircraftLookupClient(Protocol):
     async def lookup(self, hex: str) -> AircraftInfo | None: ...
 
 
-class AdsbbClient:
-    """Async adsbdb aircraft lookup with retry policy.
+class HexdbClient:
+    """Async hexdb.io aircraft lookup.
+
+    hexdb.io returns clean data sourced from government registries.
+    More accurate than adsbdb when it has data, but has more 404s.
 
     Retry policy:
         404  → return None
@@ -49,7 +39,7 @@ class AdsbbClient:
     def __init__(
         self,
         session: aiohttp.ClientSession,
-        base_url: str = "https://api.adsbdb.com/v0",
+        base_url: str = "https://hexdb.io/api/v1",
         max_retries: int = 3,
     ) -> None:
         self._session = session
@@ -69,13 +59,14 @@ class AdsbbClient:
                     resp.raise_for_status()
                 resp.raise_for_status()
                 data = await resp.json()
-                aircraft = (data.get("response") or {}).get("aircraft") or {}
-                if not aircraft:
+                # hexdb returns {"status": "404", "error": "..."} as 200 in some cases
+                if data.get("status") == "404" or data.get("error"):
                     return None
                 return AircraftInfo(
-                    registration=aircraft.get("registration"),
-                    type=aircraft.get("type"),
-                    operator=aircraft.get("registered_owner"),
-                    flag=aircraft.get("registered_owner_country_iso_name"),
+                    registration=data.get("Registration") or None,
+                    type=data.get("Type") or None,
+                    operator=data.get("RegisteredOwners") or None,
+                    flag=data.get("OperatorFlagCode") or None,
+                    icao_type=data.get("ICAOTypeCode") or None,
                 )
-        return None  # unreachable; loop always returns or raises
+        return None

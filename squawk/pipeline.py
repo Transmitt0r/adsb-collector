@@ -9,7 +9,8 @@ from datetime import timedelta
 import tar1090
 from squawk.clients.adsbdb import AircraftLookupClient
 from squawk.clients.routes import RouteClient
-from squawk.enrichment import ScoringClient, enrich_batch
+from squawk.enrichment import EnrichItem, ScoringClient, enrich_batch
+from squawk.repositories.bulk_aircraft import BulkAircraftLookup
 from squawk.repositories.enrichment import EnrichmentRepository
 from squawk.repositories.sightings import SightingRepository
 
@@ -23,6 +24,8 @@ async def run_pipeline(
     sightings: SightingRepository,
     enrichment_repo: EnrichmentRepository,
     aircraft_client: AircraftLookupClient,
+    hexdb_client: AircraftLookupClient,
+    bulk_repo: BulkAircraftLookup,
     route_client: RouteClient,
     scoring_client: ScoringClient,
     enrichment_ttl: timedelta,
@@ -31,35 +34,27 @@ async def run_pipeline(
 ) -> None:
     """Poll tar1090 in a loop, record sightings, enrich new aircraft.
 
-    In-memory state: a `pending` list of (hex, callsign) pairs waiting for
-    enrichment. Lost on restart — at most one batch worth of aircraft will
-    wait for the next TTL expiry cycle to be re-enriched. Acceptable.
-
-    Crash recovery: close_open_sightings() runs on startup and shutdown. It
-    sets ended_at on any sighting with ended_at IS NULL. Safe to call twice
-    (no-op when nothing is open).
+    In-memory state: a `pending` list of EnrichItems waiting for enrichment.
+    Lost on restart — at most one batch worth of aircraft will wait for the
+    next TTL expiry cycle to be re-enriched. Acceptable.
 
     Loop body:
     1. Poll tar1090 → list[AircraftState].
-    2. Call sightings.record_poll(states, session_timeout):
-       - Updates open sightings (last_seen, altitude/distance aggregates).
-       - Opens new sightings for unseen aircraft.
-       - Closes stale sightings (last_seen older than session_timeout).
+    2. Build hex → state lookup for telemetry (alt, speed, squawk).
+    3. Call sightings.record_poll(states, session_timeout):
+       - Opens new sightings, updates existing, closes stale.
        - Returns list[NewSighting] for aircraft new to the aircraft table.
-    3. Add new sightings to pending enrichment list.
-    4. Check enrichment TTL expiry → add expired (hex, callsign) to pending.
-    5. If pending >= batch_size or flush_interval elapsed:
-       call enrich_batch(), clear pending.
-    6. Sleep poll_interval, repeat.
-
-    Error handling: tar1090 poll failure or record_poll failure → log,
-    skip cycle, continue. enrich_batch failure → log, continue (pending
-    is cleared regardless — failed aircraft will be retried via TTL expiry).
+    4. Add new sightings to pending (with live telemetry).
+    5. Check enrichment TTL expiry → add expired to pending (with telemetry).
+    6. Re-enrich any cached aircraft that now have a callsign but were
+       previously enriched without one.
+    7. If pending >= batch_size or flush_interval elapsed: enrich_batch().
+    8. Sleep poll_interval, repeat.
     """
     await sightings.close_open_sightings()
     logger.info("pipeline started, polling %s every %.1fs", poll_url, poll_interval)
 
-    pending: list[tuple[str, str | None]] = []
+    pending: list[EnrichItem] = []
     loop = asyncio.get_running_loop()
     last_flush = loop.time()
 
@@ -73,7 +68,10 @@ async def run_pipeline(
                 await asyncio.sleep(poll_interval)
                 continue
 
-            # 2. Record poll.
+            # 2. Build hex → state lookup for telemetry.
+            state_by_hex = {s.hex: s for s in states}
+
+            # 3. Record poll.
             try:
                 new_sightings = await sightings.record_poll(states, session_timeout)
             except Exception:
@@ -81,24 +79,67 @@ async def run_pipeline(
                 await asyncio.sleep(poll_interval)
                 continue
 
-            # 3. Add new aircraft to pending.
+            # 4. Add new aircraft to pending with live telemetry.
             for ns in new_sightings:
-                pending.append((ns.hex, ns.callsign))
+                state = state_by_hex.get(ns.hex)
+                pending.append(
+                    EnrichItem(
+                        hex=ns.hex,
+                        callsign=ns.callsign,
+                        alt_baro=state.alt_baro if state else None,
+                        gs=state.gs if state else None,
+                        squawk=state.squawk if state else None,
+                    )
+                )
 
-            # 4. Check enrichment TTL expiry.
+            # 5. Check enrichment TTL expiry.
             current_hexes = [s.hex for s in states]
             if current_hexes:
                 try:
                     expired = await enrichment_repo.get_expired(
                         current_hexes, enrichment_ttl
                     )
-                    pending.extend(expired)
+                    for hex_, callsign in expired:
+                        state = state_by_hex.get(hex_)
+                        pending.append(
+                            EnrichItem(
+                                hex=hex_,
+                                callsign=callsign,
+                                alt_baro=state.alt_baro if state else None,
+                                gs=state.gs if state else None,
+                                squawk=state.squawk if state else None,
+                            )
+                        )
                 except Exception:
                     logger.exception(
                         "pipeline: get_expired failed, skipping expiry check"
                     )
 
-            # 5. Flush if batch is full or flush_interval has elapsed.
+            # 6. Re-enrich when a callsign appears for a previously-anonymous hex.
+            callsign_hexes = [s.hex for s in states if s.flight]
+            if callsign_hexes:
+                try:
+                    null_callsign = await enrichment_repo.get_null_callsign_cached(
+                        callsign_hexes
+                    )
+                    for hex_ in null_callsign:
+                        state = state_by_hex.get(hex_)
+                        if state:
+                            pending.append(
+                                EnrichItem(
+                                    hex=hex_,
+                                    callsign=state.flight,
+                                    alt_baro=state.alt_baro,
+                                    gs=state.gs,
+                                    squawk=state.squawk,
+                                )
+                            )
+                except Exception:
+                    logger.exception(
+                        "pipeline: get_null_callsign_cached failed, skipping"
+                    )
+
+            # 7. Flush if batch is full or flush_interval has elapsed.
             now = loop.time()
             if pending and (
                 len(pending) >= batch_size or (now - last_flush) >= flush_interval
@@ -110,6 +151,8 @@ async def run_pipeline(
                     await enrich_batch(
                         items=items,
                         aircraft_client=aircraft_client,
+                        hexdb_client=hexdb_client,
+                        bulk_repo=bulk_repo,
                         route_client=route_client,
                         scoring_client=scoring_client,
                         enrichment_repo=enrichment_repo,
@@ -120,7 +163,7 @@ async def run_pipeline(
                         "pipeline: enrich_batch failed for %d items", len(items)
                     )
 
-            # 6. Sleep until next poll.
+            # 8. Sleep until next poll.
             await asyncio.sleep(poll_interval)
     finally:
         await sightings.close_open_sightings()

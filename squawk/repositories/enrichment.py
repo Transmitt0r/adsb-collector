@@ -61,8 +61,8 @@ class EnrichmentRepository:
                     INSERT INTO enriched_aircraft
                         (hex, registration, type, operator, flag,
                          story_score, story_tags, annotation,
-                         enriched_at, expires_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                         enriched_at, expires_at, callsign)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (hex) DO UPDATE SET
                         registration = EXCLUDED.registration,
                         type         = EXCLUDED.type,
@@ -72,7 +72,8 @@ class EnrichmentRepository:
                         story_tags   = EXCLUDED.story_tags,
                         annotation   = EXCLUDED.annotation,
                         enriched_at  = EXCLUDED.enriched_at,
-                        expires_at   = EXCLUDED.expires_at
+                        expires_at   = EXCLUDED.expires_at,
+                        callsign     = EXCLUDED.callsign
                     """,
                     hex,
                     aircraft_info.registration if aircraft_info else None,
@@ -84,6 +85,7 @@ class EnrichmentRepository:
                     annotation,
                     now,
                     expires_at,
+                    callsign,
                 )
 
                 if callsign is not None and route_info is not None:
@@ -153,3 +155,24 @@ class EnrichmentRepository:
                 hexes,
             )
         return [(r["hex"], r["callsign"]) for r in rows]
+
+    async def get_null_callsign_cached(self, hexes: list[str]) -> list[str]:
+        """Return hexes that are cached but were enriched without a callsign.
+
+        Used to trigger re-enrichment when a previously-unidentified aircraft
+        starts broadcasting a callsign — gives the scoring AI better context.
+        Only returns non-expired entries (expired ones go through the TTL path).
+        """
+        if not hexes:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT hex FROM enriched_aircraft
+                WHERE hex = ANY($1::text[])
+                  AND callsign IS NULL
+                  AND expires_at > now()
+                """,
+                hexes,
+            )
+        return [r["hex"] for r in rows]

@@ -31,6 +31,8 @@ class Config:
     enrichment_flush_interval: float = 30.0
     client_max_retries: int = 3
     adsbdb_url: str = "https://api.adsbdb.com/v0"
+    hexdb_url: str = "https://hexdb.io/api/v1"
+    mictronics_url: str = "https://www.mictronics.de/aircraft-database/aircraft_db.php"
     planespotters_url: str = "https://api.planespotters.net/pub"
     routes_url: str = "https://api.adsbdb.com/v0"
 
@@ -51,6 +53,11 @@ class Config:
             enrichment_flush_interval=float(env.get("ENRICHMENT_FLUSH_SECS", "30")),
             client_max_retries=int(env.get("CLIENT_MAX_RETRIES", "3")),
             adsbdb_url=env.get("ADSBDB_URL", "https://api.adsbdb.com/v0"),
+            hexdb_url=env.get("HEXDB_URL", "https://hexdb.io/api/v1"),
+            mictronics_url=env.get(
+                "MICTRONICS_URL",
+                "https://www.mictronics.de/aircraft-database/aircraft_db.php",
+            ),
             planespotters_url=env.get(
                 "PLANESPOTTERS_URL", "https://api.planespotters.net/pub"
             ),

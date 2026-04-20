@@ -21,7 +21,7 @@ from testcontainers.postgres import PostgresContainer
 
 from squawk.clients.adsbdb import AircraftInfo
 from squawk.clients.routes import RouteInfo
-from squawk.enrichment import ScoreResult
+from squawk.enrichment import EnrichItem, ScoreResult
 from squawk.pipeline import run_pipeline
 from squawk.repositories.enrichment import EnrichmentRepository
 from squawk.repositories.sightings import SightingRepository
@@ -115,7 +115,7 @@ class _MockScoringClient:
 
     async def score_batch(
         self,
-        aircraft: list[tuple[str, str | None, AircraftInfo | None, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         self.calls.append(aircraft)
         return [
@@ -131,6 +131,17 @@ class _MockScoringClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _MockBulkRepo:
+    async def lookup(self, hex: str) -> AircraftInfo | None:
+        return None
+
+    async def truncate(self) -> None:
+        pass
+
+    async def insert_batch(self, records: list) -> None:
+        pass
 
 
 async def _run_pipeline(
@@ -162,6 +173,8 @@ async def _run_pipeline(
                 sightings=sightings_repo,
                 enrichment_repo=enrichment_repo,
                 aircraft_client=aircraft_client or _MockAircraftClient(),
+                hexdb_client=_MockAircraftClient(info=None),
+                bulk_repo=_MockBulkRepo(),
                 route_client=route_client or _MockRouteClient(),
                 scoring_client=scoring_client,
                 enrichment_ttl=enrichment_ttl,
@@ -334,6 +347,8 @@ async def test_pipeline_handles_poll_error(
                 sightings=sightings_repo,
                 enrichment_repo=enrichment_repo,
                 aircraft_client=_MockAircraftClient(),
+                hexdb_client=_MockAircraftClient(info=None),
+                bulk_repo=_MockBulkRepo(),
                 route_client=_MockRouteClient(),
                 scoring_client=scoring,
                 enrichment_ttl=timedelta(days=30),

@@ -12,6 +12,8 @@ from telegram.ext import Application
 from squawk.bot.app import TelegramBot
 from squawk.bot.broadcaster import DmBroadcaster, TelegramBroadcaster
 from squawk.clients.adsbdb import AdsbbClient
+from squawk.clients.hexdb import HexdbClient
+from squawk.clients.mictronics import download_and_ingest as mictronics_ingest
 from squawk.clients.planespotters import PlanespottersClient
 from squawk.clients.routes import RoutesClient
 from squawk.config import Config
@@ -21,6 +23,7 @@ from squawk.enrichment import _GeminiScoringClient
 from squawk.pipeline import run_pipeline
 from squawk.queries.charts import ChartQuery
 from squawk.queries.digest import DigestQuery
+from squawk.repositories.bulk_aircraft import BulkAircraftRepository
 from squawk.repositories.digest import DigestRepository
 from squawk.repositories.enrichment import EnrichmentRepository
 from squawk.repositories.sightings import SightingRepository
@@ -43,6 +46,7 @@ async def main() -> None:
     # Repositories
     sightings_repo = SightingRepository(pool)
     enrichment_repo = EnrichmentRepository(pool)
+    bulk_repo = BulkAircraftRepository(pool)
     digest_repo = DigestRepository(pool)
 
     # Read queries
@@ -52,6 +56,7 @@ async def main() -> None:
     async with aiohttp.ClientSession() as http:
         # HTTP clients
         aircraft_client = AdsbbClient(http, config.adsbdb_url)
+        hexdb_client = HexdbClient(http, config.hexdb_url)
         route_client = RoutesClient(http, config.routes_url)
         photo_client = PlanespottersClient(http, config.planespotters_url)
 
@@ -97,11 +102,18 @@ async def main() -> None:
                 now - timedelta(days=7), now, broadcaster=channel_broadcaster
             )
 
+        async def _refresh_bulk_db() -> None:
+            try:
+                await mictronics_ingest(http, bulk_repo, config.mictronics_url)
+            except Exception:
+                logger.exception("bulk_db: refresh failed")
+
         # Scheduler
         scheduler = APSchedulerBackend()
         scheduler.add_cron_job(
             _scheduled_digest, config.digest_schedule, tz="Europe/Berlin"
         )
+        scheduler.add_cron_job(_refresh_bulk_db, "0 3 * * *", tz="UTC")
         scheduler.start()
 
         # Bot
@@ -110,6 +122,9 @@ async def main() -> None:
             on_debug_digest=_debug_digest,
             admin_chat_id=config.admin_chat_id,
         )
+
+        # Download bulk aircraft DB on startup (non-fatal if it fails)
+        await _refresh_bulk_db()
 
         try:
             async with asyncio.TaskGroup() as tg:
@@ -121,6 +136,8 @@ async def main() -> None:
                         sightings=sightings_repo,
                         enrichment_repo=enrichment_repo,
                         aircraft_client=aircraft_client,
+                        hexdb_client=hexdb_client,
+                        bulk_repo=bulk_repo,
                         route_client=route_client,
                         scoring_client=scoring_client,
                         enrichment_ttl=config.enrichment_ttl,
