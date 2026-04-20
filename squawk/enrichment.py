@@ -30,11 +30,12 @@ You rate aircraft for a weekly ADS-B digest near Stuttgart, Germany.
 For each aircraft in the list, return a score (1–10):
 
 Score guidelines:
-- 1–3: Routine commercial traffic (Ryanair, Eurowings, short domestic routes)
+- 1–3: Routine commercial traffic (Ryanair, Eurowings, short domestic routes),
+       and medical/air ambulance flights — these are very common near Stuttgart
+       due to proximity to a major hospital and should not be highlighted
 - 4–6: Interesting but normal (long-haul, cargo, unfamiliar operator)
 - 7–8: Unusual (military, private jet, exotic destination, rare type)
-- 9–10: Very rare or extraordinary (historic aircraft, emergency squawk,
-        medical evacuation, VIP transport)
+- 9–10: Very rare or extraordinary (historic aircraft, emergency squawk, VIP transport)
 
 Data sources — each aircraft has up to three database entries:
 - bulk_db: mictronics.de daily export from government aircraft registries.
@@ -66,7 +67,7 @@ Input fields per aircraft:
 
 Output fields:
 - tags: short English keywords (e.g. "military", "cargo", "bizjet",
-  "emergency", "long-haul", "unusual-operator")
+  "emergency", "long-haul", "unusual-operator", "medical")
 - annotation: one English sentence explaining why interesting; "" if score ≤ 3
 
 Return a JSON object with "results" — an array in the same order as the input.
