@@ -1,4 +1,4 @@
-"""Digest — generate and broadcast weekly flight digests."""
+"""Digest — generate and broadcast daily flight digests."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 _APP_NAME = "adsb_digest"
 
 _DIGEST_SYSTEM_PROMPT = """
-Du bist ein unterhaltsamer Luftfahrt-Journalist, der einen wöchentlichen Digest
+Du bist ein unterhaltsamer Luftfahrt-Journalist, der einen täglichen Digest
 über Flugzeuge schreibt, die von einem privaten ADS-B-Empfänger nahe Stuttgart
 empfangen wurden.
 
@@ -56,7 +56,7 @@ FORMAT (Telegram HTML, KEIN Markdown):
 
 STRUKTUR — genau diese vier Abschnitte:
 
-<b>✈️ Highlights der Woche</b>
+<b>✈️ Highlights des Tages</b>
 2-3 Absätze über die interessantesten Flugzeuge (hohe Scores, military, private jets,
 exotische Operator, Notfall-Squawks). Ein Absatz pro Highlight. Nur hier: individuelle
 Kennzeichen oder Registrierungen nennen.
@@ -69,7 +69,7 @@ Mittelmeer."
 <b>🆕 Neue Gesichter</b>
 2-3 der interessantesten Erstbesucher. Falls keine interessanten dabei, ein kurzer Satz.
 
-<b>📊 Fakten der Woche</b>
+<b>📊 Fakten des Tages</b>
 Genau diese Zeilen mit echten Daten:
 ✈️ Flüge gesichtet: <total_sightings>
 🛬 Verschiedene Flugzeuge: <unique_aircraft>
@@ -167,7 +167,7 @@ class _GeminiDigestClient:
         agent = LlmAgent(
             model=self._model,
             name="digest_agent",
-            description="Generates engaging weekly flight digests from ADS-B data.",
+            description="Generates engaging daily flight digests from ADS-B data.",
             instruction=_DIGEST_SYSTEM_PROMPT,
             output_schema=_DigestOutputModel,
         )
@@ -308,9 +308,8 @@ async def generate_digest(
 
 async def _generate_chart(chart_query: ChartQuery, n_days: int) -> bytes | None:
     try:
-        daily = await chart_query.get_daily(n_days)
         hourly = await chart_query.get_hourly(n_days)
-        return render_traffic_chart(daily, hourly)
+        return render_traffic_chart(hourly)
     except Exception:
         logger.exception("generate_digest: chart generation failed")
         return None

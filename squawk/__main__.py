@@ -99,7 +99,7 @@ async def main() -> None:
         async def _scheduled_digest() -> None:
             now = datetime.now(tz=timezone.utc)
             await _do_digest(
-                now - timedelta(days=7), now, broadcaster=channel_broadcaster
+                now - timedelta(hours=24), now, broadcaster=channel_broadcaster
             )
 
         async def _refresh_bulk_db() -> None:

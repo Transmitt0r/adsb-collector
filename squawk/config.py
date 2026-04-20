@@ -25,7 +25,7 @@ class Config:
     # Optional with defaults
     poll_interval: float = 5.0
     session_timeout: float = 300.0
-    digest_schedule: str = "0 8 * * 6"
+    digest_schedule: str = "15 7 * * *"
     enrichment_ttl: timedelta = field(default_factory=lambda: timedelta(days=30))
     enrichment_batch_size: int = 20
     enrichment_flush_interval: float = 30.0
@@ -47,7 +47,7 @@ class Config:
             channel_id=int(env["CHANNEL_ID"]),
             poll_interval=float(env.get("POLL_INTERVAL", "5")),
             session_timeout=float(env.get("SESSION_TIMEOUT", "300")),
-            digest_schedule=env.get("DIGEST_SCHEDULE", "0 8 * * 0"),
+            digest_schedule=env.get("DIGEST_SCHEDULE", "15 7 * * *"),
             enrichment_ttl=timedelta(days=int(env.get("ENRICHMENT_TTL_DAYS", "30"))),
             enrichment_batch_size=int(env.get("ENRICHMENT_BATCH_SIZE", "20")),
             enrichment_flush_interval=float(env.get("ENRICHMENT_FLUSH_SECS", "30")),

@@ -52,7 +52,7 @@ async def _send_digest(
         await bot.send_photo(
             chat_id=chat_id,
             photo=chart_png,
-            caption="📈 Flugverkehr der Woche",
+            caption="📈 Flugverkehr des Tages",
         )
 
 

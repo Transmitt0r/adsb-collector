@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _APP_NAME = "adsb_enrichment"
 
 _SCORING_SYSTEM_PROMPT = """
-You rate aircraft for a weekly ADS-B digest near Stuttgart, Germany.
+You rate aircraft for a daily ADS-B digest near Stuttgart, Germany.
 For each aircraft in the list, return a score (1–10):
 
 Score guidelines:

@@ -8,13 +8,6 @@ import asyncpg
 
 
 @dataclass(frozen=True)
-class DailyCount:
-    day: str
-    weekday: int
-    flights: int
-
-
-@dataclass(frozen=True)
 class HourlyCount:
     hour: int
     flights: int
@@ -23,28 +16,6 @@ class HourlyCount:
 class ChartQuery:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
-
-    async def get_daily(self, days: int) -> list[DailyCount]:
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT
-                    DATE(started_at AT TIME ZONE 'Europe/Berlin') AS day,
-                    EXTRACT(
-                        DOW FROM started_at AT TIME ZONE 'Europe/Berlin'
-                    )::int AS weekday,
-                    COUNT(*) AS flights
-                FROM sightings
-                WHERE started_at > now() - ($1 || ' days')::interval
-                GROUP BY 1, 2
-                ORDER BY 1
-                """,
-                str(days),
-            )
-        return [
-            DailyCount(day=str(r["day"]), weekday=r["weekday"], flights=r["flights"])
-            for r in rows
-        ]
 
     async def get_hourly(self, days: int) -> list[HourlyCount]:
         async with self._pool.acquire() as conn:
