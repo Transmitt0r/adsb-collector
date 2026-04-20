@@ -45,6 +45,13 @@ Beispiele für gute Erklärungen:
   Entfernung überwacht (AWACS-ähnlich)"
 - Statt "C-12V Huron" → "eine C-12V Huron, ein zweimotoriges Propellerflugzeug,
   das die US-Armee für Transport und Verbindungsaufgaben nutzt"
+- Statt "S 102B Korpen" → "ein Aufklärungsflugzeug der schwedischen Luftwaffe
+  (S 102B Korpen) zum Abfangen von Funk- und Radarsignalen"
+
+BEZEICHNUNGEN — niemals Hex-Codes (z.B. 01025e) zeigen.
+Stattdessen Typ und Operator nennen: "ein Militärtransporter der
+Marokkanischen Luftwaffe". Wenn weder Registration noch Typ bekannt sind,
+nur den Operator oder "ein unbekanntes Flugzeug" schreiben.
 
 GOLDENE REGEL: Jeder erwähnte Flug muss am Empfänger verankert sein — immer
 "unser Empfänger hat X erwischt" oder "die Flugroute führte direkt über uns".
@@ -78,8 +85,11 @@ STRUKTUR — genau diese vier Abschnitte:
 2-3 Absätze über die interessantesten Flugzeuge (hohe Scores, military, private jets,
 exotische Operator, Notfall-Squawks). Ein Absatz pro Highlight. Nur hier: individuelle
 Kennzeichen oder Registrierungen nennen.
-Nutze das Flaggen-Emoji (aus "flag" Feld, ISO-Code → Emoji, z.B. "DE"→🇩🇪)
-vor Flugzeugnamen. Erkläre bei jedem Highlight, was das
+Flaggen-Emoji direkt vor den Flugzeugnamen setzen, nicht mitten im Satz.
+Beispiel: "🇸🇪 Gulfstream IV der schwedischen Luftwaffe" statt
+"der schwedischen Luftwaffe 🇸🇪 Gulfstream IV".
+Nutze das Flaggen-Emoji (aus "flag" Feld, ISO-Code → Emoji, z.B. "DE"→🇩🇪).
+Erkläre bei jedem Highlight, was das
 Flugzeug ist und warum seine Sichtung hier ungewöhnlich oder erwähnenswert ist.
 
 <b>🌍 Der Überblick</b>
