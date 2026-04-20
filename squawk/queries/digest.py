@@ -128,7 +128,7 @@ class DigestQuery:
                 LEFT JOIN enriched_aircraft ea ON ea.hex = r.hex
                 LEFT JOIN callsign_routes cr ON cr.callsign = r.most_used_callsign
                 ORDER BY ea.story_score DESC NULLS LAST, r.visit_count DESC
-                LIMIT 20
+                LIMIT 100
                 """,
                 days,
             )
