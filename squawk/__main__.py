@@ -192,7 +192,6 @@ async def main() -> None:
                         bulk_repo=bulk_repo,
                         route_client=route_client,
                         scoring_client=scoring_client,
-                        enrichment_ttl=config.enrichment_ttl,
                         batch_size=config.enrichment_batch_size,
                         flush_interval=config.enrichment_flush_interval,
                     )

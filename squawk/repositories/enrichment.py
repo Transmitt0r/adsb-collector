@@ -1,7 +1,6 @@
 """EnrichmentRepository — owns enriched_aircraft and callsign_routes tables.
 
 Written by enrich_batch() only. No other module may write to these tables.
-run_pipeline() has read-only access via get_expired().
 
 Idempotency contract
 --------------------
@@ -13,7 +12,7 @@ Idempotency contract
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import asyncpg
 
@@ -41,7 +40,6 @@ class EnrichmentRepository:
         aircraft_info: AircraftInfo | None,
         route_info: RouteInfo | None,
         callsign: str | None,
-        enrichment_ttl: timedelta,
     ) -> None:
         """Upsert enrichment data for one aircraft.
 
@@ -53,7 +51,6 @@ class EnrichmentRepository:
         row being updated with identical values.
         """
         now = datetime.now(tz=timezone.utc)
-        expires_at = now + enrichment_ttl
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -62,8 +59,8 @@ class EnrichmentRepository:
                     INSERT INTO enriched_aircraft
                         (hex, registration, type, operator, flag,
                          story_score, story_tags, annotation,
-                         enriched_at, expires_at, callsign)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                         enriched_at, callsign)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (hex) DO UPDATE SET
                         registration = EXCLUDED.registration,
                         type         = EXCLUDED.type,
@@ -73,7 +70,6 @@ class EnrichmentRepository:
                         story_tags   = EXCLUDED.story_tags,
                         annotation   = EXCLUDED.annotation,
                         enriched_at  = EXCLUDED.enriched_at,
-                        expires_at   = EXCLUDED.expires_at,
                         callsign     = EXCLUDED.callsign
                     """,
                     hex,
@@ -85,7 +81,6 @@ class EnrichmentRepository:
                     tags,
                     annotation,
                     now,
-                    expires_at,
                     callsign,
                 )
 
@@ -120,49 +115,66 @@ class EnrichmentRepository:
                         now,
                     )
 
-    async def get_expired(
+    async def update_route_only(
         self,
-        hexes: list[str],
-        ttl: timedelta,
-    ) -> list[tuple[str, str | None]]:
-        """Return (hex, callsign) pairs for aircraft whose enrichment has expired.
+        hex: str,
+        callsign: str,
+        route_info: RouteInfo,
+    ) -> None:
+        """Update callsign on enriched_aircraft and upsert route, without re-scoring.
 
-        Only considers hexes that already have an enriched_aircraft row.
-        Brand-new hexes (not yet enriched) are excluded — HexFirstSeen covers them.
-        This prevents emitting both HexFirstSeen and EnrichmentExpired for the same
-        hex in the same poll cycle.
-
-        ``ttl`` is used to compute the expiry cutoff: any row with
-        ``expires_at <= now()`` is considered expired.
-
-        The callsign is read from the aircraft table (most recent callsign seen)
-        to avoid a separate lookup when constructing EnrichmentExpired events.
-        Returns empty list if hexes is empty.
+        Used when an aircraft was enriched without a callsign and later
+        broadcasts one. The score/tags/annotation remain unchanged.
         """
-        if not hexes:
-            return []
+        now = datetime.now(tz=timezone.utc)
 
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT ea.hex,
-                       (SELECT callsigns[array_length(callsigns, 1)]
-                        FROM aircraft
-                        WHERE hex = ea.hex) AS callsign
-                FROM enriched_aircraft ea
-                WHERE ea.hex = ANY($1::text[])
-                  AND ea.expires_at <= now()
-                """,
-                hexes,
-            )
-        return [(r["hex"], r["callsign"]) for r in rows]
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE enriched_aircraft
+                    SET callsign = $2
+                    WHERE hex = $1
+                    """,
+                    hex,
+                    callsign,
+                )
+
+                await conn.execute(
+                    """
+                    INSERT INTO callsign_routes
+                        (callsign, origin_iata, origin_icao, origin_city,
+                         origin_country, dest_iata, dest_icao, dest_city,
+                         dest_country, fetched_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (callsign) DO UPDATE SET
+                        origin_iata    = EXCLUDED.origin_iata,
+                        origin_icao    = EXCLUDED.origin_icao,
+                        origin_city    = EXCLUDED.origin_city,
+                        origin_country = EXCLUDED.origin_country,
+                        dest_iata      = EXCLUDED.dest_iata,
+                        dest_icao      = EXCLUDED.dest_icao,
+                        dest_city      = EXCLUDED.dest_city,
+                        dest_country   = EXCLUDED.dest_country,
+                        fetched_at     = EXCLUDED.fetched_at
+                    """,
+                    callsign,
+                    route_info.origin_iata,
+                    route_info.origin_icao,
+                    route_info.origin_city,
+                    route_info.origin_country,
+                    route_info.dest_iata,
+                    route_info.dest_icao,
+                    route_info.dest_city,
+                    route_info.dest_country,
+                    now,
+                )
 
     async def get_null_callsign_cached(self, hexes: list[str]) -> list[str]:
         """Return hexes that are cached but were enriched without a callsign.
 
-        Used to trigger re-enrichment when a previously-unidentified aircraft
-        starts broadcasting a callsign — gives the scoring AI better context.
-        Only returns non-expired entries (expired ones go through the TTL path).
+        Used to trigger route-only updates when a previously-unidentified aircraft
+        starts broadcasting a callsign.
         """
         if not hexes:
             return []
@@ -172,7 +184,6 @@ class EnrichmentRepository:
                 SELECT hex FROM enriched_aircraft
                 WHERE hex = ANY($1::text[])
                   AND callsign IS NULL
-                  AND expires_at > now()
                 """,
                 hexes,
             )

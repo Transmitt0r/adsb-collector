@@ -7,7 +7,6 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Protocol
 
 from google.adk.agents import LlmAgent
@@ -25,6 +24,74 @@ from squawk.tags import TAG_DESCRIPTIONS, StoryTag
 logger = logging.getLogger(__name__)
 
 _APP_NAME = "adsb_enrichment"
+
+_EMERGENCY_SQUAWKS = frozenset({"7500", "7600", "7700"})
+
+ROUTINE_TYPES = frozenset(
+    {
+        "A318",
+        "A319",
+        "A320",
+        "A321",
+        "A20N",
+        "A21N",
+        "B712",
+        "B733",
+        "B734",
+        "B735",
+        "B737",
+        "B738",
+        "B739",
+        "B38M",
+        "B39M",
+        "E190",
+        "E195",
+        "E290",
+        "E295",
+        "CRJ7",
+        "CRJ9",
+        "DH8A",
+        "DH8B",
+        "DH8C",
+        "DH8D",
+        "AT43",
+        "AT45",
+        "AT72",
+        "AT76",
+    }
+)
+
+ROUTINE_OPERATORS = frozenset(
+    {
+        "ryanair",
+        "eurowings",
+        "easyjet",
+        "wizz air",
+        "vueling",
+        "lauda europe",
+        "malta air",
+        "ryanair uk",
+        "ryanair sun",
+        "lufthansa",
+        "air france",
+        "klm",
+        "british airways",
+        "swiss",
+        "austrian",
+        "turkish airlines",
+        "lufthansa cityline",
+        "air dolomiti",
+        "tuifly",
+        "tap air portugal",
+        "iberia",
+        "alitalia",
+        "ita airways",
+        "sas",
+        "scandinavian airlines",
+        "norwegian air shuttle",
+        "klm cityhopper",
+    }
+)
 
 
 def _build_tag_list() -> str:
@@ -48,33 +115,18 @@ Score guidelines:
 - 7–8: Unusual (military, private jet, exotic destination, rare type)
 - 9–10: Very rare or extraordinary (historic aircraft, emergency squawk, VIP transport)
 
-Data sources — each aircraft has up to three database entries:
-- bulk_db: mictronics.de daily export from government aircraft registries.
-  Most authoritative for registration and icao_type. Has no operator data.
-- hexdb: hexdb.io, also from government registries. Reliable when present.
-- adsbdb: community-maintained ADSB-DB. Has rich human-readable type descriptions
-  but can be wrong. If it contradicts bulk_db or hexdb on registration or icao_type,
-  prefer the registry sources.
-
-Conflict resolution rules:
-1. Telemetry always wins for plausibility: alt_baro_ft and gs_knots are ground
-   truth. An aircraft flying at 39,000 ft at 450 kt is not a seaplane or WWII
-   piston aircraft, regardless of what any database says.
-2. Registry sources (bulk_db, hexdb) beat adsbdb for registration and ICAO type.
-   If adsbdb says "Douglas DC-3" but bulk_db icao_type says "A320", trust A320.
-3. Agreement across sources increases confidence. If all three agree on
-   registration, treat it as certain.
-4. Squawk 7500 (hijack), 7600 (radio failure), 7700 (emergency) → score ≥ 9.
-5. No hallucination: if all sources return null for type/registration/operator,
-   do NOT infer aircraft identity from the hex code. Score ≤ 4 unless the
-   callsign or squawk provides clear evidence of something unusual.
+Rules:
+1. Squawk 7500 (hijack), 7600 (radio failure), 7700 (emergency) → score ≥ 9.
+2. No hallucination: if type/registration/operator are all null,
+   do NOT infer aircraft identity. Score ≤ 4 unless the callsign or squawk
+   provides clear evidence of something unusual.
 
 Input fields per aircraft:
 - hex, callsign: ADS-B identity
 - alt_baro_ft, gs_knots, squawk: live telemetry (ground truth)
-- bulk_db, hexdb, adsbdb: registry data objects (null if source had no entry),
-  each with: registration, icao_type, type (human-readable), operator, flag
-- origin/dest fields: route information from a separate route database
+- aircraft: merged registry data (null if no source had data),
+   with: registration, icao_type, type (human-readable), operator, flag
+- origin/dest fields: route information from a route database
 
 Tag descriptions:
 """
@@ -103,19 +155,6 @@ class EnrichItem:
 
 
 @dataclass(frozen=True)
-class AircraftSources:
-    """Raw per-source aircraft info passed to the scoring AI.
-
-    Keeping sources separate lets the AI reason about source reliability and
-    conflicts rather than receiving a silently pre-merged record.
-    """
-
-    bulk: AircraftInfo | None  # mictronics.de — government registries, most reliable
-    hexdb: AircraftInfo | None  # hexdb.io — government registries
-    adsbdb: AircraftInfo | None  # ADSB-DB — community-maintained, can be wrong
-
-
-@dataclass(frozen=True)
 class ScoreResult:
     score: int  # 1–10
     tags: list[StoryTag]
@@ -125,8 +164,44 @@ class ScoreResult:
 class ScoringClient(Protocol):
     async def score_batch(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]: ...
+
+
+# ---------------------------------------------------------------------------
+# Pre-filter — deterministic scoring without LLM
+# ---------------------------------------------------------------------------
+
+
+def _is_routine_operator(operator: str | None) -> bool:
+    if not operator:
+        return False
+    lower = operator.lower()
+    return any(op in lower for op in ROUTINE_OPERATORS)
+
+
+def pre_filter_score(
+    merged: AircraftInfo | None,
+    route: RouteInfo | None,
+    squawk: str | None,
+) -> ScoreResult | None:
+    """Return a deterministic ScoreResult or None if the LLM is needed."""
+    if squawk in _EMERGENCY_SQUAWKS:
+        return ScoreResult(
+            score=9,
+            tags=[StoryTag.EMERGENCY],
+            annotation=f"Emergency squawk {squawk} detected.",
+        )
+
+    if merged is not None and merged.mil:
+        return ScoreResult(score=7, tags=[StoryTag.MILITARY], annotation="")
+
+    if merged is not None and _is_routine_operator(merged.operator):
+        icao = merged.icao_type
+        if icao and icao in ROUTINE_TYPES:
+            return ScoreResult(score=1, tags=[StoryTag.COMMERCIAL], annotation="")
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -149,35 +224,31 @@ class _ScoreBatchModel(BaseModel):
 # Private ADK-backed ScoringClient implementation
 # ---------------------------------------------------------------------------
 
+
 _FALLBACK_SCORE = ScoreResult(score=1, tags=[], annotation="")
-
-
-def _info_to_dict(info: AircraftInfo | None) -> dict | None:
-    if info is None:
-        return None
-    return {
-        "registration": info.registration,
-        "icao_type": info.icao_type,
-        "type": info.type,
-        "operator": info.operator,
-        "flag": info.flag,
-    }
 
 
 def _aircraft_to_dict(
     item: EnrichItem,
-    sources: AircraftSources,
+    merged: AircraftInfo | None,
     route: RouteInfo | None,
 ) -> dict:
+    info_dict = None
+    if merged is not None:
+        info_dict = {
+            "registration": merged.registration,
+            "icao_type": merged.icao_type,
+            "type": merged.type,
+            "operator": merged.operator,
+            "flag": merged.flag,
+        }
     return {
         "hex": item.hex,
         "callsign": item.callsign,
         "alt_baro_ft": item.alt_baro,
         "gs_knots": item.gs,
         "squawk": item.squawk,
-        "bulk_db": _info_to_dict(sources.bulk),
-        "hexdb": _info_to_dict(sources.hexdb),
-        "adsbdb": _info_to_dict(sources.adsbdb),
+        "aircraft": info_dict,
         "origin_iata": route.origin_iata if route else None,
         "origin_icao": route.origin_icao if route else None,
         "origin_city": route.origin_city if route else None,
@@ -197,19 +268,18 @@ class _GeminiScoringClient:
 
     async def score_batch(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         if not aircraft:
             return []
 
-        # Deduplicate by hex
         seen: dict[str, int] = {}
-        deduped: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]] = []
+        deduped: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]] = []
         index_map: list[int] = []
-        for item, sources, route in aircraft:
+        for item, merged, route in aircraft:
             if item.hex not in seen:
                 seen[item.hex] = len(deduped)
-                deduped.append((item, sources, route))
+                deduped.append((item, merged, route))
             index_map.append(seen[item.hex])
 
         scores = await self._score_deduped(deduped)
@@ -217,10 +287,10 @@ class _GeminiScoringClient:
 
     async def _score_deduped(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         input_dicts = [
-            _aircraft_to_dict(item, sources, route) for item, sources, route in aircraft
+            _aircraft_to_dict(item, merged, route) for item, merged, route in aircraft
         ]
         user_text = "Aircraft:\n" + json.dumps(
             input_dicts, ensure_ascii=False, indent=2
@@ -288,11 +358,11 @@ class _GeminiScoringClient:
 
     async def _fallback(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         results: list[ScoreResult] = []
-        for item, sources, route in aircraft:
-            input_dicts = [_aircraft_to_dict(item, sources, route)]
+        for item, merged, route in aircraft:
+            input_dicts = [_aircraft_to_dict(item, merged, route)]
             user_text = "Aircraft:\n" + json.dumps(input_dicts, ensure_ascii=False)
 
             agent = LlmAgent(
@@ -376,6 +446,7 @@ def _merge_aircraft_info(
     - type (human): adsbdb > hexdb > bulk  (adsbdb has best human-readable names)
     - operator:     hexdb > adsbdb          (mictronics has no operator)
     - flag:         adsbdb > hexdb          (adsbdb has ISO country name)
+    - mil:          bulk only               (only mictronics has this flag)
 
     Returns None only if all three sources returned None.
     """
@@ -408,6 +479,8 @@ def _merge_aircraft_info(
             bulk.icao_type if bulk else None,
             hexdb.icao_type if hexdb else None,
         ),
+        mil=bulk.mil if bulk else None,
+        short_type=bulk.short_type if bulk else None,
     )
 
 
@@ -424,22 +497,21 @@ async def enrich_batch(
     route_client: RouteClient,
     scoring_client: ScoringClient,
     enrichment_repo: EnrichmentRepository,
-    enrichment_ttl: timedelta,
 ) -> None:
     """Fetch external data from three sources, score via AI, store results.
 
     1. Fetch AircraftInfo from adsbdb, hexdb, and bulk_aircraft in parallel.
     2. Merge the three sources into one AircraftInfo per aircraft.
     3. Fetch RouteInfo in parallel.
-    4. Call scoring_client.score_batch() — one Gemini call for the whole batch.
-    5. Store each result via enrichment_repo.store() (upsert, idempotent).
+    4. Pre-filter: deterministically score routine aircraft without the LLM.
+    5. Call scoring_client.score_batch() for remaining aircraft.
+    6. Store each result via enrichment_repo.store() (upsert, idempotent).
     """
     if not items:
         return
 
-    logger.info("enrich_batch: scoring %d aircraft", len(items))
+    logger.info("enrich_batch: processing %d aircraft", len(items))
 
-    # Fetch all three aircraft info sources in parallel
     adsbdb_infos, hexdb_infos, bulk_infos, route_infos = await asyncio.gather(
         asyncio.gather(*[_fetch_aircraft(aircraft_client, i.hex) for i in items]),
         asyncio.gather(*[_fetch_aircraft(hexdb_client, i.hex) for i in items]),
@@ -447,49 +519,80 @@ async def enrich_batch(
         asyncio.gather(*[_fetch_route(route_client, i.callsign) for i in items]),
     )
 
-    # Build per-source objects for the AI (raw, unmerged — lets it reason about
-    # source reliability and conflicts) and merged info for storage.
-    sources_list = [
-        AircraftSources(bulk=bulk, hexdb=hexdb, adsbdb=adsbdb)
+    merged_infos = [
+        _merge_aircraft_info(bulk, hexdb, adsbdb)
         for bulk, hexdb, adsbdb in zip(bulk_infos, hexdb_infos, adsbdb_infos)
     ]
-    merged_infos = [
-        _merge_aircraft_info(s.bulk, s.hexdb, s.adsbdb) for s in sources_list
-    ]
 
-    scoring_input = [
-        (item, sources, route)
-        for item, sources, route in zip(items, sources_list, route_infos)
-    ]
+    pre_filtered: list[tuple[int, ScoreResult]] = []
+    needs_llm: list[tuple[int, EnrichItem, AircraftInfo | None, RouteInfo | None]] = []
+
+    for i, item in enumerate(items):
+        result = pre_filter_score(merged_infos[i], route_infos[i], item.squawk)
+        if result is not None:
+            pre_filtered.append((i, result))
+        else:
+            needs_llm.append((i, item, merged_infos[i], route_infos[i]))
+
+    for i, result in pre_filtered:
+        try:
+            await enrichment_repo.store(
+                hex=items[i].hex,
+                score=result.score,
+                tags=result.tags,
+                annotation=result.annotation,
+                aircraft_info=merged_infos[i],
+                route_info=route_infos[i],
+                callsign=items[i].callsign,
+            )
+        except Exception:
+            logger.exception(
+                "enrich_batch: store failed for hex=%s; skipping", items[i].hex
+            )
+
+    if not needs_llm:
+        logger.info(
+            "enrich_batch: all %d aircraft pre-filtered, no LLM call needed",
+            len(items),
+        )
+        return
+
+    logger.info(
+        "enrich_batch: %d/%d aircraft need LLM scoring",
+        len(needs_llm),
+        len(items),
+    )
+
+    scoring_input = [(item, merged, route) for _, item, merged, route in needs_llm]
 
     try:
         scores = await scoring_client.score_batch(scoring_input)
     except Exception:
         logger.exception(
-            "enrich_batch: score_batch failed for batch of %d; skipping", len(items)
+            "enrich_batch: score_batch failed for batch of %d; skipping",
+            len(needs_llm),
         )
         return
 
-    if len(scores) != len(items):
+    if len(scores) != len(needs_llm):
         logger.error(
             "enrich_batch: score_batch returned %d results for %d inputs; skipping",
             len(scores),
-            len(items),
+            len(needs_llm),
         )
         return
 
-    for i, item in enumerate(items):
-        score = scores[i]
+    for j, (orig_idx, item, _, _) in enumerate(needs_llm):
+        score = scores[j]
         try:
             await enrichment_repo.store(
                 hex=item.hex,
                 score=score.score,
                 tags=score.tags,
                 annotation=score.annotation,
-                aircraft_info=merged_infos[i],
-                route_info=route_infos[i],
+                aircraft_info=merged_infos[orig_idx],
+                route_info=route_infos[orig_idx],
                 callsign=item.callsign,
-                enrichment_ttl=enrichment_ttl,
             )
         except Exception:
             logger.exception(

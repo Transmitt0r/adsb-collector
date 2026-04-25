@@ -138,8 +138,8 @@ async def _insert_enrichment(
             INSERT INTO enriched_aircraft
                 (hex, registration, type, operator, flag,
                  story_score, story_tags, annotation,
-                 enriched_at, expires_at)
-            VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, now(), now() + interval '30 days')
+                 enriched_at)
+            VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, now())
             ON CONFLICT (hex) DO UPDATE SET
                 story_score  = EXCLUDED.story_score,
                 story_tags   = EXCLUDED.story_tags,
@@ -432,14 +432,15 @@ async def test_get_stats_returns_peak_hour(
     query: DigestQuery, pool: asyncpg.Pool
 ) -> None:
     """Peak hour is the local hour (Europe/Berlin) with the most sightings."""
-    # Insert 2 sightings at a fixed UTC time so we can predict the local hour
-    fixed_utc = datetime(
-        2026, 4, 14, 10, 0, 0, tzinfo=timezone.utc
-    )  # 12:00 Berlin (CEST)
+    # Use a fixed UTC time on today's date so it falls within the 7-day window.
+    # 10:00 UTC in April = 12:00 CEST (UTC+2)
+    today = datetime.now(tz=timezone.utc).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
     await _insert_aircraft(pool, "aaa111")
     await _insert_aircraft(pool, "bbb222")
-    await _insert_sighting(pool, "aaa111", started_at=fixed_utc)
-    await _insert_sighting(pool, "bbb222", started_at=fixed_utc + timedelta(minutes=30))
+    await _insert_sighting(pool, "aaa111", started_at=today)
+    await _insert_sighting(pool, "bbb222", started_at=today + timedelta(minutes=30))
 
     stats = await query.get_stats(days=7)
     assert stats.peak_hour == 12  # Europe/Berlin = UTC+2 in April (CEST)

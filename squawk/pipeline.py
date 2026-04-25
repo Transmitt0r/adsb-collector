@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
 
 import tar1090
 from squawk.clients.adsbdb import AircraftLookupClient
@@ -28,15 +27,14 @@ async def run_pipeline(
     bulk_repo: BulkAircraftLookup,
     route_client: RouteClient,
     scoring_client: ScoringClient,
-    enrichment_ttl: timedelta,
     batch_size: int,
     flush_interval: float,
 ) -> None:
     """Poll tar1090 in a loop, record sightings, enrich new aircraft.
 
     In-memory state: a `pending` list of EnrichItems waiting for enrichment.
-    Lost on restart — at most one batch worth of aircraft will wait for the
-    next TTL expiry cycle to be re-enriched. Acceptable.
+    Lost on restart — at most one batch worth of aircraft will not be
+    enriched. Acceptable.
 
     Loop body:
     1. Poll tar1090 → list[AircraftState].
@@ -45,11 +43,10 @@ async def run_pipeline(
        - Opens new sightings, updates existing, closes stale.
        - Returns list[NewSighting] for aircraft new to the aircraft table.
     4. Add new sightings to pending (with live telemetry).
-    5. Check enrichment TTL expiry → add expired to pending (with telemetry).
-    6. Re-enrich any cached aircraft that now have a callsign but were
-       previously enriched without one.
-    7. If pending >= batch_size or flush_interval elapsed: enrich_batch().
-    8. Sleep poll_interval, repeat.
+    5. When aircraft with null callsign now broadcast one: fetch route only
+       (no re-scoring).
+    6. If pending >= batch_size or flush_interval elapsed: enrich_batch().
+    7. Sleep poll_interval, repeat.
     """
     await sightings.close_open_sightings()
     logger.info("pipeline started, polling %s every %.1fs", poll_url, poll_interval)
@@ -92,30 +89,7 @@ async def run_pipeline(
                     )
                 )
 
-            # 5. Check enrichment TTL expiry.
-            current_hexes = [s.hex for s in states]
-            if current_hexes:
-                try:
-                    expired = await enrichment_repo.get_expired(
-                        current_hexes, enrichment_ttl
-                    )
-                    for hex_, callsign in expired:
-                        state = state_by_hex.get(hex_)
-                        pending.append(
-                            EnrichItem(
-                                hex=hex_,
-                                callsign=callsign,
-                                alt_baro=state.alt_baro if state else None,
-                                gs=state.gs if state else None,
-                                squawk=state.squawk if state else None,
-                            )
-                        )
-                except Exception:
-                    logger.exception(
-                        "pipeline: get_expired failed, skipping expiry check"
-                    )
-
-            # 6. Re-enrich when a callsign appears for a previously-anonymous hex.
+            # 5. Fetch route when a callsign appears for a previously-anonymous hex.
             callsign_hexes = [s.hex for s in states if s.flight]
             if callsign_hexes:
                 try:
@@ -124,22 +98,24 @@ async def run_pipeline(
                     )
                     for hex_ in null_callsign:
                         state = state_by_hex.get(hex_)
-                        if state:
-                            pending.append(
-                                EnrichItem(
-                                    hex=hex_,
-                                    callsign=state.flight,
-                                    alt_baro=state.alt_baro,
-                                    gs=state.gs,
-                                    squawk=state.squawk,
+                        if state and state.flight:
+                            try:
+                                route = await route_client.lookup(state.flight)
+                                if route is not None:
+                                    await enrichment_repo.update_route_only(
+                                        hex_, state.flight, route
+                                    )
+                            except Exception:
+                                logger.exception(
+                                    "pipeline: route update failed for hex=%s",
+                                    hex_,
                                 )
-                            )
                 except Exception:
                     logger.exception(
                         "pipeline: get_null_callsign_cached failed, skipping"
                     )
 
-            # 7. Flush if batch is full or flush_interval has elapsed.
+            # 6. Flush if batch is full or flush_interval has elapsed.
             now = loop.time()
             if pending and (
                 len(pending) >= batch_size or (now - last_flush) >= flush_interval
@@ -156,14 +132,13 @@ async def run_pipeline(
                         route_client=route_client,
                         scoring_client=scoring_client,
                         enrichment_repo=enrichment_repo,
-                        enrichment_ttl=enrichment_ttl,
                     )
                 except Exception:
                     logger.exception(
                         "pipeline: enrich_batch failed for %d items", len(items)
                     )
 
-            # 8. Sleep until next poll.
+            # 7. Sleep until next poll.
             await asyncio.sleep(poll_interval)
     finally:
         await sightings.close_open_sightings()

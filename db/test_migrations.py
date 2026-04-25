@@ -74,10 +74,8 @@ async def test_migrate_up_and_down(db_url: str) -> None:
         await conn.close()
 
     # --- down (roll back all migrations) ---
-    dbmate(db_url, "down")
-    dbmate(db_url, "down")
-    dbmate(db_url, "down")
-    dbmate(db_url, "down")
+    for _ in range(5):
+        dbmate(db_url, "down")
 
     conn = await asyncpg.connect(dsn=db_url)
     try:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import asyncpg
@@ -21,8 +21,9 @@ from testcontainers.postgres import PostgresContainer
 
 from squawk.clients.adsbdb import AircraftInfo
 from squawk.clients.routes import RouteInfo
-from squawk.enrichment import AircraftSources, EnrichItem, ScoreResult
+from squawk.enrichment import EnrichItem, ScoreResult
 from squawk.pipeline import run_pipeline
+from squawk.repositories.bulk_aircraft import BulkAircraftLookup
 from squawk.repositories.enrichment import EnrichmentRepository
 from squawk.repositories.sightings import SightingRepository
 from squawk.tags import StoryTag
@@ -35,7 +36,24 @@ AIRCRAFT_INFO = AircraftInfo(
     registration="G-TEST",
     type="A320",
     operator="Test Airways",
-    flag="🇬🇧",
+    flag="GB",
+)
+
+ROUTINE_AIRCRAFT_INFO = AircraftInfo(
+    registration="D-TEST",
+    type="Airbus A320-214",
+    operator="Ryanair",
+    flag="IE",
+    icao_type="A320",
+)
+
+MILITARY_AIRCRAFT_INFO = AircraftInfo(
+    registration="42+01",
+    type="Eurofighter Typhoon",
+    operator="German Air Force",
+    flag="DE",
+    icao_type="EF18",
+    mil=True,
 )
 
 ROUTE_INFO = RouteInfo(
@@ -94,7 +112,7 @@ def make_state(
 
 class _MockAircraftClient:
     def __init__(self, info: AircraftInfo | None = None) -> None:
-        self._info = info or AIRCRAFT_INFO
+        self._info = info
 
     async def lookup(self, hex: str) -> AircraftInfo | None:
         return self._info
@@ -116,7 +134,7 @@ class _MockScoringClient:
 
     async def score_batch(
         self,
-        aircraft: list[tuple[EnrichItem, AircraftSources, RouteInfo | None]],
+        aircraft: list[tuple[EnrichItem, AircraftInfo | None, RouteInfo | None]],
     ) -> list[ScoreResult]:
         self.calls.append(aircraft)
         return [
@@ -150,11 +168,11 @@ async def _run_pipeline(
     sightings_repo: SightingRepository,
     enrichment_repo: EnrichmentRepository,
     scoring_client: _MockScoringClient,
-    enrichment_ttl: timedelta = timedelta(days=30),
     batch_size: int = 2,
     max_cycles: int = 3,
     aircraft_client: _MockAircraftClient | None = None,
     route_client: _MockRouteClient | None = None,
+    bulk_repo: BulkAircraftLookup | None = None,
 ) -> None:
     call_count = 0
 
@@ -175,10 +193,9 @@ async def _run_pipeline(
                 enrichment_repo=enrichment_repo,
                 aircraft_client=aircraft_client or _MockAircraftClient(),
                 hexdb_client=_MockAircraftClient(info=None),
-                bulk_repo=_MockBulkRepo(),
+                bulk_repo=bulk_repo or _MockBulkRepo(),
                 route_client=route_client or _MockRouteClient(),
                 scoring_client=scoring_client,
-                enrichment_ttl=enrichment_ttl,
                 batch_size=batch_size,
                 flush_interval=0.001,
             )
@@ -278,49 +295,6 @@ async def test_pipeline_creates_sightings_and_enriches_new_aircraft(
     assert len(scoring.calls[0]) == 2
 
 
-async def test_pipeline_ttl_expiry_triggers_re_enrichment(
-    sightings_repo: SightingRepository,
-    enrichment_repo: EnrichmentRepository,
-    pool: asyncpg.Pool,
-) -> None:
-    await _insert_aircraft(pool, "aaa111", "FL111")
-    await enrichment_repo.store(
-        hex="aaa111",
-        score=3,
-        tags=[StoryTag.COMMERCIAL],
-        annotation="Old annotation.",
-        aircraft_info=None,
-        route_info=None,
-        callsign=None,
-        enrichment_ttl=timedelta(seconds=-1),
-    )
-
-    scoring = _MockScoringClient(score=9, tags=[StoryTag.MILITARY])
-    states = [make_state(hex="aaa111", flight="FL111")]
-
-    await _run_pipeline(
-        states,
-        sightings_repo,
-        enrichment_repo,
-        scoring,
-        enrichment_ttl=timedelta(days=30),
-        batch_size=1,
-    )
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT story_score, story_tags, annotation"
-            " FROM enriched_aircraft WHERE hex = 'aaa111'"
-        )
-
-    assert row is not None
-    assert row["story_score"] == 9
-    assert row["story_tags"] == ["military"]
-    assert row["annotation"] == "Test annotation."
-
-    assert len(scoring.calls) == 1
-
-
 async def test_pipeline_handles_poll_error(
     sightings_repo: SightingRepository,
     enrichment_repo: EnrichmentRepository,
@@ -352,7 +326,6 @@ async def test_pipeline_handles_poll_error(
                 bulk_repo=_MockBulkRepo(),
                 route_client=_MockRouteClient(),
                 scoring_client=scoring,
-                enrichment_ttl=timedelta(days=30),
                 batch_size=1,
                 flush_interval=0.001,
             )
@@ -393,3 +366,174 @@ async def test_pipeline_close_open_sightings_on_shutdown(
         )
 
     assert open_count == 0
+
+
+async def test_pipeline_pre_filter_skips_routine_aircraft(
+    sightings_repo: SightingRepository,
+    enrichment_repo: EnrichmentRepository,
+    pool: asyncpg.Pool,
+) -> None:
+    states = [make_state(hex="aaa111", flight="FR1234")]
+
+    class _BulkWithRoutine:
+        async def lookup(self, hex: str) -> AircraftInfo | None:
+            return ROUTINE_AIRCRAFT_INFO
+
+    scoring = _MockScoringClient(score=5)
+
+    await _run_pipeline(
+        states,
+        sightings_repo,
+        enrichment_repo,
+        scoring,
+        batch_size=1,
+        bulk_repo=_BulkWithRoutine(),
+        aircraft_client=_MockAircraftClient(
+            info=AircraftInfo(
+                registration="D-TEST",
+                type="Airbus A320-214",
+                operator="Ryanair",
+                flag="IE",
+                icao_type="A320",
+            )
+        ),
+    )
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT story_score, story_tags FROM enriched_aircraft WHERE hex = 'aaa111'"
+        )
+
+    assert row is not None
+    assert row["story_score"] == 1
+    assert row["story_tags"] == ["commercial"]
+    assert len(scoring.calls) == 0
+
+
+async def test_pipeline_pre_filter_emergency_squawk(
+    sightings_repo: SightingRepository,
+    enrichment_repo: EnrichmentRepository,
+    pool: asyncpg.Pool,
+) -> None:
+    states = [make_state(hex="aaa111", flight="FL111", squawk="7700")]
+    scoring = _MockScoringClient(score=5)
+
+    await _run_pipeline(
+        states,
+        sightings_repo,
+        enrichment_repo,
+        scoring,
+        batch_size=1,
+    )
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT story_score, story_tags, annotation"
+            " FROM enriched_aircraft WHERE hex = 'aaa111'"
+        )
+
+    assert row is not None
+    assert row["story_score"] == 9
+    assert row["story_tags"] == ["emergency"]
+    assert "7700" in row["annotation"]
+    assert len(scoring.calls) == 0
+
+
+async def test_pipeline_pre_filter_military(
+    sightings_repo: SightingRepository,
+    enrichment_repo: EnrichmentRepository,
+    pool: asyncpg.Pool,
+) -> None:
+    states = [make_state(hex="aaa111", flight="GER431")]
+
+    class _BulkWithMilitary:
+        async def lookup(self, hex: str) -> AircraftInfo | None:
+            return MILITARY_AIRCRAFT_INFO
+
+    scoring = _MockScoringClient(score=5)
+
+    await _run_pipeline(
+        states,
+        sightings_repo,
+        enrichment_repo,
+        scoring,
+        batch_size=1,
+        bulk_repo=_BulkWithMilitary(),
+        aircraft_client=_MockAircraftClient(info=MILITARY_AIRCRAFT_INFO),
+    )
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT story_score, story_tags FROM enriched_aircraft WHERE hex = 'aaa111'"
+        )
+
+    assert row is not None
+    assert row["story_score"] == 7
+    assert row["story_tags"] == ["military"]
+    assert len(scoring.calls) == 0
+
+
+async def test_pipeline_null_callsign_only_fetches_route(
+    sightings_repo: SightingRepository,
+    enrichment_repo: EnrichmentRepository,
+    pool: asyncpg.Pool,
+) -> None:
+    await _insert_aircraft(pool, "aaa111", None)
+    await enrichment_repo.store(
+        hex="aaa111",
+        score=5,
+        tags=[StoryTag.COMMERCIAL],
+        annotation="Some annotation.",
+        aircraft_info=AIRCRAFT_INFO,
+        route_info=None,
+        callsign=None,
+    )
+
+    scoring = _MockScoringClient(score=9)
+    states = [make_state(hex="aaa111", flight="FL111")]
+
+    call_count = 0
+
+    async def mock_poll(url: str, timeout: float = 5.0) -> list[AircraftState]:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 3:
+            raise asyncio.CancelledError()
+        return states
+
+    with patch("squawk.pipeline.tar1090.poll", side_effect=mock_poll):
+        task = asyncio.create_task(
+            run_pipeline(
+                poll_url="http://test",
+                poll_interval=0.001,
+                session_timeout=300,
+                sightings=sightings_repo,
+                enrichment_repo=enrichment_repo,
+                aircraft_client=_MockAircraftClient(),
+                hexdb_client=_MockAircraftClient(info=None),
+                bulk_repo=_MockBulkRepo(),
+                route_client=_MockRouteClient(),
+                scoring_client=scoring,
+                batch_size=1,
+                flush_interval=0.001,
+            )
+        )
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT story_score, story_tags, callsign"
+            " FROM enriched_aircraft WHERE hex = 'aaa111'"
+        )
+        route = await conn.fetchrow(
+            "SELECT callsign FROM callsign_routes WHERE callsign = 'FL111'"
+        )
+
+    assert row is not None
+    assert row["story_score"] == 5
+    assert row["callsign"] == "FL111"
+    assert route is not None
+    assert len(scoring.calls) == 0

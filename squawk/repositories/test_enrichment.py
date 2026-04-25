@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import asyncpg
 import pytest
@@ -38,7 +38,7 @@ AIRCRAFT_INFO = AircraftInfo(
     registration="G-EUUU",
     type="A320",
     operator="British Airways",
-    flag="🇬🇧",
+    flag="GB",
 )
 
 ROUTE_INFO = RouteInfo(
@@ -51,9 +51,6 @@ ROUTE_INFO = RouteInfo(
     dest_city="Paris",
     dest_country="France",
 )
-
-TTL_30_DAYS = timedelta(days=30)
-TTL_EXPIRED = timedelta(seconds=-1)  # already expired
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +119,6 @@ async def test_store_inserts_enriched_aircraft(
         aircraft_info=AIRCRAFT_INFO,
         route_info=ROUTE_INFO,
         callsign="BA123",
-        enrichment_ttl=TTL_30_DAYS,
     )
 
     async with pool.acquire() as conn:
@@ -137,7 +133,7 @@ async def test_store_inserts_enriched_aircraft(
     assert row["story_score"] == 7
     assert row["story_tags"] == ["commercial", "widebody"]
     assert row["annotation"] == "Interessantes Flugzeug."
-    assert row["expires_at"] > row["enriched_at"]
+    assert row["enriched_at"] is not None
 
 
 async def test_store_upserts_enriched_aircraft(
@@ -153,7 +149,6 @@ async def test_store_upserts_enriched_aircraft(
         aircraft_info=AIRCRAFT_INFO,
         route_info=None,
         callsign=None,
-        enrichment_ttl=TTL_30_DAYS,
     )
     await repo.store(
         hex="abc123",
@@ -163,7 +158,6 @@ async def test_store_upserts_enriched_aircraft(
         aircraft_info=AIRCRAFT_INFO,
         route_info=None,
         callsign=None,
-        enrichment_ttl=TTL_30_DAYS,
     )
 
     async with pool.acquire() as conn:
@@ -194,7 +188,6 @@ async def test_store_handles_null_aircraft_info(
         aircraft_info=None,
         route_info=None,
         callsign=None,
-        enrichment_ttl=TTL_30_DAYS,
     )
 
     async with pool.acquire() as conn:
@@ -227,7 +220,6 @@ async def test_store_inserts_callsign_route(
         aircraft_info=None,
         route_info=ROUTE_INFO,
         callsign="BA123",
-        enrichment_ttl=TTL_30_DAYS,
     )
 
     async with pool.acquire() as conn:
@@ -265,7 +257,6 @@ async def test_store_upserts_callsign_route(
         aircraft_info=None,
         route_info=old_route,
         callsign="BA123",
-        enrichment_ttl=TTL_30_DAYS,
     )
     await repo.store(
         hex="abc123",
@@ -275,7 +266,6 @@ async def test_store_upserts_callsign_route(
         aircraft_info=None,
         route_info=ROUTE_INFO,
         callsign="BA123",
-        enrichment_ttl=TTL_30_DAYS,
     )
 
     async with pool.acquire() as conn:
@@ -287,7 +277,7 @@ async def test_store_upserts_callsign_route(
         )
 
     assert count == 1
-    assert row["origin_iata"] == "LHR"  # updated to ROUTE_INFO value
+    assert row["origin_iata"] == "LHR"
 
 
 async def test_store_skips_route_when_callsign_none(
@@ -301,9 +291,8 @@ async def test_store_skips_route_when_callsign_none(
         tags=[],
         annotation="",
         aircraft_info=None,
-        route_info=ROUTE_INFO,  # route_info provided but callsign=None → skip
+        route_info=ROUTE_INFO,
         callsign=None,
-        enrichment_ttl=TTL_30_DAYS,
     )
 
     async with pool.acquire() as conn:
@@ -325,7 +314,6 @@ async def test_store_skips_route_when_route_info_none(
         aircraft_info=None,
         route_info=None,
         callsign="BA123",
-        enrichment_ttl=TTL_30_DAYS,
     )
 
     async with pool.acquire() as conn:
@@ -335,21 +323,23 @@ async def test_store_skips_route_when_route_info_none(
 
 
 # ---------------------------------------------------------------------------
-# get_expired
+# get_null_callsign_cached
 # ---------------------------------------------------------------------------
 
 
-async def test_get_expired_returns_empty_for_empty_input(
+async def test_get_null_callsign_cached_returns_empty_for_empty_input(
     repo: EnrichmentRepository,
 ) -> None:
-    result = await repo.get_expired([], TTL_30_DAYS)
+    result = await repo.get_null_callsign_cached([])
     assert result == []
 
 
-async def test_get_expired_excludes_non_expired(
+async def test_get_null_callsign_cached_returns_hexes_without_callsign(
     repo: EnrichmentRepository, pool: asyncpg.Pool
 ) -> None:
-    await _insert_aircraft(pool, "abc123", "BA123")
+    await _insert_aircraft(pool, "abc123")
+    await _insert_aircraft(pool, "def456", "BA123")
+
     await repo.store(
         hex="abc123",
         score=5,
@@ -358,17 +348,27 @@ async def test_get_expired_excludes_non_expired(
         aircraft_info=None,
         route_info=None,
         callsign=None,
-        enrichment_ttl=TTL_30_DAYS,  # expires 30 days from now
+    )
+    await repo.store(
+        hex="def456",
+        score=5,
+        tags=[],
+        annotation="",
+        aircraft_info=None,
+        route_info=None,
+        callsign="BA123",
     )
 
-    result = await repo.get_expired(["abc123"], TTL_30_DAYS)
-    assert result == []
+    result = await repo.get_null_callsign_cached(["abc123", "def456"])
+    assert result == ["abc123"]
 
 
-async def test_get_expired_returns_expired_hex(
+async def test_get_null_callsign_cached_excludes_uncached_hexes(
     repo: EnrichmentRepository, pool: asyncpg.Pool
 ) -> None:
-    await _insert_aircraft(pool, "abc123", "BA123")
+    await _insert_aircraft(pool, "abc123")
+    await _insert_aircraft(pool, "newone", "FL999")
+
     await repo.store(
         hex="abc123",
         score=5,
@@ -377,59 +377,85 @@ async def test_get_expired_returns_expired_hex(
         aircraft_info=None,
         route_info=None,
         callsign=None,
-        enrichment_ttl=TTL_EXPIRED,  # expires immediately (in the past)
     )
 
-    result = await repo.get_expired(["abc123"], TTL_30_DAYS)
-    assert len(result) == 1
-    assert result[0][0] == "abc123"
+    result = await repo.get_null_callsign_cached(["abc123", "newone"])
+    assert result == ["abc123"]
 
 
-async def test_get_expired_returns_callsign(
+# ---------------------------------------------------------------------------
+# update_route_only
+# ---------------------------------------------------------------------------
+
+
+async def test_update_route_only_updates_callsign_and_route(
+    repo: EnrichmentRepository, pool: asyncpg.Pool
+) -> None:
+    await _insert_aircraft(pool, "abc123")
+
+    await repo.store(
+        hex="abc123",
+        score=5,
+        tags=[StoryTag.COMMERCIAL],
+        annotation="Test.",
+        aircraft_info=None,
+        route_info=None,
+        callsign=None,
+    )
+
+    await repo.update_route_only("abc123", "BA123", ROUTE_INFO)
+
+    async with pool.acquire() as conn:
+        ea = await conn.fetchrow(
+            "SELECT callsign, story_score, story_tags, annotation"
+            " FROM enriched_aircraft WHERE hex = 'abc123'"
+        )
+        route = await conn.fetchrow(
+            "SELECT * FROM callsign_routes WHERE callsign = 'BA123'"
+        )
+
+    assert ea["callsign"] == "BA123"
+    assert ea["story_score"] == 5
+    assert ea["story_tags"] == ["commercial"]
+    assert ea["annotation"] == "Test."
+    assert route is not None
+    assert route["origin_iata"] == "LHR"
+    assert route["dest_iata"] == "CDG"
+
+
+async def test_update_route_only_upserts_route(
     repo: EnrichmentRepository, pool: asyncpg.Pool
 ) -> None:
     await _insert_aircraft(pool, "abc123", "BA123")
+
     await repo.store(
         hex="abc123",
         score=5,
         tags=[],
         annotation="",
         aircraft_info=None,
-        route_info=None,
-        callsign=None,
-        enrichment_ttl=TTL_EXPIRED,
+        route_info=RouteInfo(
+            origin_iata="JFK",
+            origin_icao="KJFK",
+            origin_city="New York",
+            origin_country="United States",
+            dest_iata="LHR",
+            dest_icao="EGLL",
+            dest_city="London",
+            dest_country="United Kingdom",
+        ),
+        callsign="BA123",
     )
 
-    result = await repo.get_expired(["abc123"], TTL_30_DAYS)
-    assert result[0] == ("abc123", "BA123")
+    await repo.update_route_only("abc123", "BA123", ROUTE_INFO)
 
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM callsign_routes WHERE callsign = 'BA123'"
+        )
+        row = await conn.fetchrow(
+            "SELECT origin_iata FROM callsign_routes WHERE callsign = 'BA123'"
+        )
 
-async def test_get_expired_excludes_hexes_without_enrichment_row(
-    repo: EnrichmentRepository, pool: asyncpg.Pool
-) -> None:
-    """Brand-new hexes (no enriched_aircraft row) must be excluded."""
-    await _insert_aircraft(pool, "newone", "EZ500")
-    # No store() call → no enriched_aircraft row
-
-    result = await repo.get_expired(["newone"], TTL_30_DAYS)
-    assert result == []
-
-
-async def test_get_expired_handles_multiple_hexes(
-    repo: EnrichmentRepository, pool: asyncpg.Pool
-) -> None:
-    for hex_, callsign in [
-        ("aaa111", "LH100"),
-        ("bbb222", "FR200"),
-        ("ccc333", "EZY300"),
-    ]:
-        await _insert_aircraft(pool, hex_, callsign)
-
-    # Two expired, one fresh
-    await repo.store("aaa111", 5, [], "", None, None, None, TTL_EXPIRED)
-    await repo.store("bbb222", 5, [], "", None, None, None, TTL_30_DAYS)
-    await repo.store("ccc333", 5, [], "", None, None, None, TTL_EXPIRED)
-
-    result = await repo.get_expired(["aaa111", "bbb222", "ccc333"], TTL_30_DAYS)
-    expired_hexes = {r[0] for r in result}
-    assert expired_hexes == {"aaa111", "ccc333"}
+    assert count == 1
+    assert row["origin_iata"] == "LHR"

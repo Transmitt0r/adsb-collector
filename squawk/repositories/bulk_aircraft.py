@@ -41,7 +41,7 @@ class BulkAircraftRepository:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT registration, icao_type, model
+                SELECT registration, icao_type, model, mil, short_type
                 FROM bulk_aircraft WHERE hex = $1
                 """,
                 hex.lower(),
@@ -55,10 +55,12 @@ class BulkAircraftRepository:
             return None
         return AircraftInfo(
             registration=reg,
-            type=model or icao_type,  # prefer human-readable desc, fall back to code
-            operator=None,  # mictronics doesn't provide operator
+            type=model or icao_type,
+            operator=None,
             flag=None,
             icao_type=icao_type,
+            mil=row["mil"],
+            short_type=row["short_type"],
         )
 
     async def prepare_ingest(self) -> None:

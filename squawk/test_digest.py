@@ -157,8 +157,8 @@ async def _insert_enrichment(
             INSERT INTO enriched_aircraft
                 (hex, registration, type, operator, flag,
                  story_score, story_tags, annotation,
-                 enriched_at, expires_at)
-            VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, now(), now() + interval '30 days')
+                 enriched_at)
+            VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, now())
             ON CONFLICT (hex) DO UPDATE SET
                 story_score  = EXCLUDED.story_score,
                 story_tags   = EXCLUDED.story_tags,
