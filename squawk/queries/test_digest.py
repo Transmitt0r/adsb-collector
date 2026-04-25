@@ -367,16 +367,16 @@ async def test_get_candidates_story_tags_returned_as_list(
     assert result[0].story_tags == ["military", "bizjet"]
 
 
-async def test_get_candidates_limited_to_100(
+async def test_get_candidates_limited_to_15(
     query: DigestQuery, pool: asyncpg.Pool
 ) -> None:
-    for i in range(110):
+    for i in range(20):
         hex_ = f"hex{i:04d}"
         await _insert_aircraft(pool, hex_)
         await _insert_sighting(pool, hex_)
 
     result = await query.get_candidates(days=7)
-    assert len(result) <= 100
+    assert len(result) <= 15
 
 
 # ---------------------------------------------------------------------------

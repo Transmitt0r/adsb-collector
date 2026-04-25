@@ -119,8 +119,9 @@ class DigestQuery:
         """Return enriched aircraft seen in the last N days, ranked by story_score.
 
         Aggregates per-hex across all sightings in the window. The most-used
-        callsign for each hex is used for route lookups. Returns up to 20
-        candidates ordered by story_score DESC (NULLs last), then visit_count DESC.
+        callsign for each hex is used for route lookups. Excludes routine
+        operators and returns up to 15 candidates ordered by story_score DESC
+        (NULLs last), then visit_count DESC.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -160,10 +161,13 @@ class DigestQuery:
                 FROM recent r
                 LEFT JOIN enriched_aircraft ea ON ea.hex = r.hex
                 LEFT JOIN callsign_routes cr ON cr.callsign = r.most_used_callsign
+                WHERE ea.operator IS NULL
+                   OR LOWER(ea.operator) NOT LIKE ANY($2::text[])
                 ORDER BY ea.story_score DESC NULLS LAST, r.visit_count DESC
-                LIMIT 100
+                LIMIT 15
                 """,
                 days,
+                [f"%{op}%" for op in ROUTINE_OPERATORS],
             )
         return [
             DigestCandidate(

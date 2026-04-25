@@ -253,6 +253,9 @@ class _GeminiDigestClient:
             description="Generates engaging daily flight digests from ADS-B data.",
             instruction=_DIGEST_SYSTEM_PROMPT,
             output_schema=_DigestOutputModel,
+            generate_content_config=genai_types.GenerateContentConfig(
+                max_output_tokens=16384,
+            ),
         )
         session_service = InMemorySessionService()
         runner = Runner(
