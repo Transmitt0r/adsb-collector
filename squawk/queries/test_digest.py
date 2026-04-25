@@ -165,14 +165,19 @@ async def _insert_route(
     dest_iata: str = "CDG",
     dest_city: str = "Paris",
     dest_country: str = "France",
+    origin_lat: float | None = None,
+    origin_lon: float | None = None,
+    dest_lat: float | None = None,
+    dest_lon: float | None = None,
 ) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO callsign_routes
                 (callsign, origin_iata, origin_icao, origin_city, origin_country,
-                 dest_iata, dest_icao, dest_city, dest_country, fetched_at)
-            VALUES ($1, $2, NULL, $3, $4, $5, NULL, $6, $7, now())
+                 dest_iata, dest_icao, dest_city, dest_country,
+                 origin_lat, origin_lon, dest_lat, dest_lon, fetched_at)
+            VALUES ($1, $2, NULL, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, now())
             ON CONFLICT (callsign) DO NOTHING
             """,
             callsign,
@@ -182,6 +187,10 @@ async def _insert_route(
             dest_iata,
             dest_city,
             dest_country,
+            origin_lat,
+            origin_lon,
+            dest_lat,
+            dest_lon,
         )
 
 
@@ -535,3 +544,179 @@ async def test_get_stats_squawk_alert_time_format(
     assert len(time_str) == 9  # 'Mon 14:32'
     assert time_str[3] == " "
     assert time_str[6] == ":"
+
+
+# ---------------------------------------------------------------------------
+# get_airline_stats
+# ---------------------------------------------------------------------------
+
+
+async def test_get_airline_stats_empty_when_no_sightings(query: DigestQuery) -> None:
+    stats = await query.get_airline_stats(days=7, home_airport="STR")
+    assert stats.top_departures == []
+    assert stats.top_arrivals == []
+    assert stats.top_operators == []
+    assert stats.longest_route is None
+
+
+async def test_get_airline_stats_top_departures(
+    query: DigestQuery, pool: asyncpg.Pool
+) -> None:
+    await _insert_aircraft(pool, "lh001")
+    await _insert_sighting(pool, "lh001", callsign="LH100")
+    await _insert_enrichment(pool, "lh001", operator="Lufthansa")
+    await _insert_route(
+        pool,
+        "LH100",
+        origin_iata="STR",
+        origin_city="Stuttgart",
+        dest_iata="PMI",
+        dest_city="Palma de Mallorca",
+        dest_country="Spain",
+    )
+
+    await _insert_aircraft(pool, "lh002")
+    await _insert_sighting(pool, "lh002", callsign="LH200")
+    await _insert_enrichment(pool, "lh002", operator="Lufthansa")
+    await _insert_route(
+        pool,
+        "LH200",
+        origin_iata="STR",
+        origin_city="Stuttgart",
+        dest_iata="PMI",
+        dest_city="Palma de Mallorca",
+        dest_country="Spain",
+    )
+
+    await _insert_aircraft(pool, "ry001")
+    await _insert_sighting(pool, "ry001", callsign="FR100")
+    await _insert_enrichment(pool, "ry001", operator="Ryanair")
+    await _insert_route(
+        pool,
+        "FR100",
+        origin_iata="STR",
+        origin_city="Stuttgart",
+        dest_iata="STN",
+        dest_city="London",
+        dest_country="United Kingdom",
+    )
+
+    stats = await query.get_airline_stats(days=7, home_airport="STR")
+    assert len(stats.top_departures) == 2
+    assert stats.top_departures[0].city == "Palma de Mallorca"
+    assert stats.top_departures[0].count == 2
+    assert stats.top_departures[1].city == "London"
+    assert stats.top_departures[1].count == 1
+
+
+async def test_get_airline_stats_top_arrivals(
+    query: DigestQuery, pool: asyncpg.Pool
+) -> None:
+    await _insert_aircraft(pool, "ew001")
+    await _insert_sighting(pool, "ew001", callsign="EW100")
+    await _insert_enrichment(pool, "ew001", operator="Eurowings")
+    await _insert_route(
+        pool,
+        "EW100",
+        origin_iata="MUC",
+        origin_city="Munich",
+        origin_country="Germany",
+        dest_iata="STR",
+        dest_city="Stuttgart",
+    )
+
+    stats = await query.get_airline_stats(days=7, home_airport="STR")
+    assert len(stats.top_arrivals) == 1
+    assert stats.top_arrivals[0].city == "Munich"
+    assert stats.top_arrivals[0].count == 1
+
+
+async def test_get_airline_stats_top_operators(
+    query: DigestQuery, pool: asyncpg.Pool
+) -> None:
+    for i in range(3):
+        hex_ = f"lh{i:03d}"
+        await _insert_aircraft(pool, hex_)
+        await _insert_sighting(pool, hex_, callsign="LH100")
+        await _insert_enrichment(pool, hex_, operator="Lufthansa")
+
+    for i in range(2):
+        hex_ = f"ry{i:03d}"
+        await _insert_aircraft(pool, hex_)
+        await _insert_sighting(pool, hex_, callsign="FR100")
+        await _insert_enrichment(pool, hex_, operator="Ryanair")
+
+    await _insert_route(
+        pool,
+        "LH100",
+        origin_iata="STR",
+        origin_city="Stuttgart",
+        dest_iata="FRA",
+        dest_city="Frankfurt",
+        dest_country="Germany",
+    )
+    await _insert_route(
+        pool,
+        "FR100",
+        origin_iata="STR",
+        origin_city="Stuttgart",
+        dest_iata="STN",
+        dest_city="London",
+        dest_country="United Kingdom",
+    )
+
+    stats = await query.get_airline_stats(days=7, home_airport="STR")
+    assert len(stats.top_operators) == 2
+    assert stats.top_operators[0].operator == "Lufthansa"
+    assert stats.top_operators[0].count == 3
+    assert stats.top_operators[1].operator == "Ryanair"
+    assert stats.top_operators[1].count == 2
+
+
+async def test_get_airline_stats_longest_route(
+    query: DigestQuery, pool: asyncpg.Pool
+) -> None:
+    await _insert_aircraft(pool, "sq001")
+    await _insert_sighting(pool, "sq001", callsign="SQ100")
+    await _insert_enrichment(pool, "sq001", operator="Singapore Airlines")
+    await _insert_route(
+        pool,
+        "SQ100",
+        origin_iata="MUC",
+        origin_city="Munich",
+        dest_iata="JFK",
+        dest_city="New York",
+        origin_lat=48.3537,
+        origin_lon=11.7750,
+        dest_lat=40.6413,
+        dest_lon=-73.7781,
+    )
+
+    stats = await query.get_airline_stats(days=7, home_airport="STR")
+    assert stats.longest_route is not None
+    lr = stats.longest_route
+    assert lr.callsign == "SQ100"
+    assert lr.operator == "Singapore Airlines"
+    assert lr.origin_city == "Munich"
+    assert lr.dest_city == "New York"
+    assert lr.distance_km > 6000
+
+
+async def test_get_airline_stats_excludes_non_routine_from_departures(
+    query: DigestQuery, pool: asyncpg.Pool
+) -> None:
+    await _insert_aircraft(pool, "priv01")
+    await _insert_sighting(pool, "priv01", callsign="GLF01")
+    await _insert_enrichment(pool, "priv01", operator="Private Wings")
+    await _insert_route(
+        pool,
+        "GLF01",
+        origin_iata="STR",
+        origin_city="Stuttgart",
+        dest_iata="GVA",
+        dest_city="Geneva",
+        dest_country="Switzerland",
+    )
+
+    stats = await query.get_airline_stats(days=7, home_airport="STR")
+    assert stats.top_departures == []

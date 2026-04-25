@@ -50,6 +50,10 @@ ROUTE_INFO = RouteInfo(
     dest_icao="LFPG",
     dest_city="Paris",
     dest_country="France",
+    origin_lat=51.4775,
+    origin_lon=-0.4614,
+    dest_lat=49.0097,
+    dest_lon=2.5479,
 )
 
 
@@ -248,6 +252,10 @@ async def test_store_upserts_callsign_route(
         dest_icao="EGLL",
         dest_city="London",
         dest_country="United Kingdom",
+        origin_lat=40.6413,
+        origin_lon=-73.7781,
+        dest_lat=51.4775,
+        dest_lon=-0.4614,
     )
     await repo.store(
         hex="abc123",
@@ -443,6 +451,10 @@ async def test_update_route_only_upserts_route(
             dest_icao="EGLL",
             dest_city="London",
             dest_country="United Kingdom",
+            origin_lat=40.6413,
+            origin_lon=-73.7781,
+            dest_lat=51.4775,
+            dest_lon=-0.4614,
         ),
         callsign="BA123",
     )

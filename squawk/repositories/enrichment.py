@@ -90,8 +90,10 @@ class EnrichmentRepository:
                         INSERT INTO callsign_routes
                             (callsign, origin_iata, origin_icao, origin_city,
                              origin_country, dest_iata, dest_icao, dest_city,
-                             dest_country, fetched_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                             dest_country, origin_lat, origin_lon,
+                             dest_lat, dest_lon, fetched_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                                $10, $11, $12, $13, $14)
                         ON CONFLICT (callsign) DO UPDATE SET
                             origin_iata    = EXCLUDED.origin_iata,
                             origin_icao    = EXCLUDED.origin_icao,
@@ -101,6 +103,10 @@ class EnrichmentRepository:
                             dest_icao      = EXCLUDED.dest_icao,
                             dest_city      = EXCLUDED.dest_city,
                             dest_country   = EXCLUDED.dest_country,
+                            origin_lat     = EXCLUDED.origin_lat,
+                            origin_lon     = EXCLUDED.origin_lon,
+                            dest_lat       = EXCLUDED.dest_lat,
+                            dest_lon       = EXCLUDED.dest_lon,
                             fetched_at     = EXCLUDED.fetched_at
                         """,
                         callsign,
@@ -112,6 +118,10 @@ class EnrichmentRepository:
                         route_info.dest_icao,
                         route_info.dest_city,
                         route_info.dest_country,
+                        route_info.origin_lat,
+                        route_info.origin_lon,
+                        route_info.dest_lat,
+                        route_info.dest_lon,
                         now,
                     )
 
@@ -145,8 +155,10 @@ class EnrichmentRepository:
                     INSERT INTO callsign_routes
                         (callsign, origin_iata, origin_icao, origin_city,
                          origin_country, dest_iata, dest_icao, dest_city,
-                         dest_country, fetched_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                         dest_country, origin_lat, origin_lon,
+                         dest_lat, dest_lon, fetched_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                            $10, $11, $12, $13, $14)
                     ON CONFLICT (callsign) DO UPDATE SET
                         origin_iata    = EXCLUDED.origin_iata,
                         origin_icao    = EXCLUDED.origin_icao,
@@ -156,6 +168,10 @@ class EnrichmentRepository:
                         dest_icao      = EXCLUDED.dest_icao,
                         dest_city      = EXCLUDED.dest_city,
                         dest_country   = EXCLUDED.dest_country,
+                        origin_lat     = EXCLUDED.origin_lat,
+                        origin_lon     = EXCLUDED.origin_lon,
+                        dest_lat       = EXCLUDED.dest_lat,
+                        dest_lon       = EXCLUDED.dest_lon,
                         fetched_at     = EXCLUDED.fetched_at
                     """,
                     callsign,
@@ -167,6 +183,10 @@ class EnrichmentRepository:
                     route_info.dest_icao,
                     route_info.dest_city,
                     route_info.dest_country,
+                    route_info.origin_lat,
+                    route_info.origin_lon,
+                    route_info.dest_lat,
+                    route_info.dest_lon,
                     now,
                 )
 

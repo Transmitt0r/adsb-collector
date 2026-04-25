@@ -16,6 +16,7 @@ from datetime import datetime
 
 import asyncpg
 
+from squawk.enrichment import ROUTINE_OPERATORS
 from squawk.tags import StoryTag
 
 _SQUAWK_MEANINGS: dict[str, str] = {
@@ -72,6 +73,36 @@ class DigestStats:
     medical_count: int = 0  # unique aircraft tagged "medical" seen this period
     police_count: int = 0  # unique aircraft tagged "police" seen this period
     squawk_alerts: list[SquawkAlert] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RouteCount:
+    city: str
+    country: str
+    count: int
+
+
+@dataclass(frozen=True)
+class OperatorCount:
+    operator: str
+    count: int
+
+
+@dataclass(frozen=True)
+class LongestRoute:
+    callsign: str
+    operator: str
+    origin_city: str
+    dest_city: str
+    distance_km: int
+
+
+@dataclass(frozen=True)
+class AirlineStats:
+    top_departures: list[RouteCount]
+    top_arrivals: list[RouteCount]
+    top_operators: list[OperatorCount]
+    longest_route: LongestRoute | None
 
 
 class DigestQuery:
@@ -253,4 +284,163 @@ class DigestQuery:
             medical_count=tag_counts_row["medical_count"] if tag_counts_row else 0,
             police_count=tag_counts_row["police_count"] if tag_counts_row else 0,
             squawk_alerts=squawk_alerts,
+        )
+
+    async def get_airline_stats(self, days: int, home_airport: str) -> AirlineStats:
+        """Return airline traffic statistics for the digest period.
+
+        Groups routine-operator sightings by route and operator to produce
+        top departures/arrivals from/to home_airport, top operators, and
+        the longest route seen (any aircraft with coordinates).
+        """
+        routine_ops = list(ROUTINE_OPERATORS)
+        like_clauses = [f"%{op}%" for op in routine_ops]
+
+        async with self._pool.acquire() as conn:
+            departures = await conn.fetch(
+                """
+                WITH recent AS (
+                    SELECT
+                        s.hex,
+                        MODE() WITHIN GROUP (ORDER BY s.callsign) AS most_used_callsign
+                    FROM sightings s
+                    WHERE s.started_at > now() - $1 * interval '1 day'
+                    GROUP BY s.hex
+                )
+                SELECT
+                    cr.dest_city    AS city,
+                    cr.dest_country AS country,
+                    COUNT(*)        AS cnt
+                FROM recent r
+                JOIN enriched_aircraft ea ON ea.hex = r.hex
+                JOIN callsign_routes cr ON cr.callsign = r.most_used_callsign
+                WHERE LOWER(ea.operator) LIKE ANY($2::text[])
+                  AND cr.origin_iata = $3
+                  AND cr.dest_city IS NOT NULL
+                GROUP BY cr.dest_city, cr.dest_country
+                ORDER BY cnt DESC
+                LIMIT 5
+                """,
+                days,
+                like_clauses,
+                home_airport,
+            )
+
+            arrivals = await conn.fetch(
+                """
+                WITH recent AS (
+                    SELECT
+                        s.hex,
+                        MODE() WITHIN GROUP (ORDER BY s.callsign) AS most_used_callsign
+                    FROM sightings s
+                    WHERE s.started_at > now() - $1 * interval '1 day'
+                    GROUP BY s.hex
+                )
+                SELECT
+                    cr.origin_city    AS city,
+                    cr.origin_country AS country,
+                    COUNT(*)          AS cnt
+                FROM recent r
+                JOIN enriched_aircraft ea ON ea.hex = r.hex
+                JOIN callsign_routes cr ON cr.callsign = r.most_used_callsign
+                WHERE LOWER(ea.operator) LIKE ANY($2::text[])
+                  AND cr.dest_iata = $3
+                  AND cr.origin_city IS NOT NULL
+                GROUP BY cr.origin_city, cr.origin_country
+                ORDER BY cnt DESC
+                LIMIT 5
+                """,
+                days,
+                like_clauses,
+                home_airport,
+            )
+
+            operators = await conn.fetch(
+                """
+                WITH recent AS (
+                    SELECT
+                        s.hex,
+                        MODE() WITHIN GROUP (ORDER BY s.callsign) AS most_used_callsign
+                    FROM sightings s
+                    WHERE s.started_at > now() - $1 * interval '1 day'
+                    GROUP BY s.hex
+                )
+                SELECT
+                    ea.operator AS operator,
+                    COUNT(*)     AS cnt
+                FROM recent r
+                JOIN enriched_aircraft ea ON ea.hex = r.hex
+                JOIN callsign_routes cr ON cr.callsign = r.most_used_callsign
+                WHERE LOWER(ea.operator) LIKE ANY($2::text[])
+                GROUP BY ea.operator
+                ORDER BY cnt DESC
+                LIMIT 3
+                """,
+                days,
+                like_clauses,
+            )
+
+            longest = await conn.fetchrow(
+                """
+                WITH recent AS (
+                    SELECT
+                        s.hex,
+                        MODE() WITHIN GROUP (ORDER BY s.callsign) AS most_used_callsign
+                    FROM sightings s
+                    WHERE s.started_at > now() - $1 * interval '1 day'
+                    GROUP BY s.hex
+                )
+                SELECT
+                    r.most_used_callsign AS callsign,
+                    ea.operator,
+                    cr.origin_city,
+                    cr.dest_city,
+                    (
+                        6371 * acos(
+                            least(1.0,
+                                cos(radians(cr.origin_lat))
+                                * cos(radians(cr.dest_lat))
+                                * cos(radians(cr.dest_lon) - radians(cr.origin_lon))
+                                + sin(radians(cr.origin_lat))
+                                * sin(radians(cr.dest_lat))
+                            )
+                        )
+                    )::int AS distance_km
+                FROM recent r
+                JOIN enriched_aircraft ea ON ea.hex = r.hex
+                JOIN callsign_routes cr ON cr.callsign = r.most_used_callsign
+                WHERE cr.origin_lat IS NOT NULL
+                  AND cr.dest_lat IS NOT NULL
+                  AND cr.origin_city IS NOT NULL
+                  AND cr.dest_city IS NOT NULL
+                ORDER BY distance_km DESC
+                LIMIT 1
+                """,
+                days,
+            )
+
+        return AirlineStats(
+            top_departures=[
+                RouteCount(city=row["city"], country=row["country"], count=row["cnt"])
+                for row in departures
+            ],
+            top_arrivals=[
+                RouteCount(city=row["city"], country=row["country"], count=row["cnt"])
+                for row in arrivals
+            ],
+            top_operators=[
+                OperatorCount(operator=row["operator"], count=row["cnt"])
+                for row in operators
+            ],
+            longest_route=(
+                LongestRoute(
+                    callsign=longest["callsign"],
+                    operator=longest["operator"],
+                    origin_city=longest["origin_city"],
+                    dest_city=longest["dest_city"],
+                    distance_km=longest["distance_km"],
+                )
+                if longest
+                else None
+            ),
         )

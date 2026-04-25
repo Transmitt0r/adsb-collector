@@ -88,6 +88,7 @@ async def main() -> None:
                 broadcaster=broadcaster,
                 period_start=period_start,
                 period_end=period_end,
+                home_airport=config.home_airport,
                 force=force,
             )
 

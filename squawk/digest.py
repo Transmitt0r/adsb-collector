@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from squawk.charts import render_traffic_chart
 from squawk.clients.planespotters import PhotoClient, PhotoInfo
 from squawk.queries.charts import ChartQuery
-from squawk.queries.digest import DigestQuery
+from squawk.queries.digest import AirlineStats, DigestQuery
 
 if TYPE_CHECKING:
     from squawk.bot.broadcaster import Broadcaster
@@ -150,6 +150,48 @@ class DigestClient(Protocol):
     ) -> DigestOutput: ...
 
 
+def _country_flag(code: str | None) -> str:
+    if not code or len(code) != 2:
+        return ""
+    return chr(0x1F1E6 + ord(code[0].upper()) - ord("A")) + chr(
+        0x1F1E6 + ord(code[1].upper()) - ord("A")
+    )
+
+
+def format_airline_stats(stats: AirlineStats) -> str:
+    parts = ["<b>\u2708\ufe0f Linienverkehr</b>\n"]
+
+    if stats.top_departures:
+        entries = ", ".join(
+            f"{r.city} {_country_flag(r.country)} ({r.count})"
+            for r in stats.top_departures
+        )
+        parts.append(f"\U0001f6eb Top Abflüge: {entries}")
+
+    if stats.top_arrivals:
+        entries = ", ".join(
+            f"{r.city} {_country_flag(r.country)} ({r.count})"
+            for r in stats.top_arrivals
+        )
+        parts.append(f"\U0001f6ec Top Ankünfte: {entries}")
+
+    if stats.top_operators:
+        entries = ", ".join(f"{o.operator} ({o.count})" for o in stats.top_operators)
+        parts.append(f"\U0001f3e2 Häufigste Airlines: {entries}")
+
+    if stats.longest_route:
+        lr = stats.longest_route
+        parts.append(
+            f"\U0001f4cf Weiteste Route: {lr.callsign} ({lr.operator}), "
+            f"{lr.origin_city} \u2192 {lr.dest_city}, {lr.distance_km:,} km"
+        )
+
+    if len(parts) == 1:
+        return ""
+
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Private Pydantic model for ADK structured output
 # ---------------------------------------------------------------------------
@@ -260,17 +302,19 @@ async def generate_digest(
     broadcaster: Broadcaster,
     period_start: datetime,
     period_end: datetime,
+    home_airport: str = "STR",
     force: bool = False,
 ) -> None:
     """Generate and broadcast a digest for the given time window.
 
     1. Check cache (skipped if force=True). Cache key = (period_end.date(), n_days).
-    2. Fetch candidates + stats via DigestQuery.
+    2. Fetch candidates + stats + airline stats via DigestQuery.
     3. Fetch photos for top candidates.
     4. Call digest_client.generate() — one Gemini call.
     5. Generate traffic chart.
-    6. Cache result via digest_repo.
-    7. Broadcast to all active users via broadcaster.
+    6. Insert Linienverkehr section into digest text.
+    7. Cache result via digest_repo.
+    8. Broadcast to all active users via broadcaster.
     """
     n_days = (period_end - period_start).days
     reference_date = period_end.date()
@@ -305,6 +349,12 @@ async def generate_digest(
         logger.exception("generate_digest: query failed; skipping digest generation")
         return
 
+    try:
+        airline_stats = await query.get_airline_stats(n_days, home_airport)
+    except Exception:
+        logger.exception("generate_digest: airline stats query failed")
+        airline_stats = None
+
     logger.info(
         "generate_digest: fetched %d candidates for n_days=%d", len(candidates), n_days
     )
@@ -330,6 +380,29 @@ async def generate_digest(
     except Exception:
         logger.exception("generate_digest: generation failed; skipping")
         return
+
+    # Insert Linienverkehr section between Highlights and Überblick.
+    if airline_stats is not None:
+        airline_section = format_airline_stats(airline_stats)
+        if airline_section:
+            highlight_marker = "<b>\u2708\ufe0f Highlights des Tages</b>"
+            overview_marker = "<b>\U0001f30d Der \u00dcberblick</b>"
+            if highlight_marker in digest.text and overview_marker in digest.text:
+                idx = digest.text.index(highlight_marker)
+                overview_idx = digest.text.index(overview_marker)
+                highlight_text = digest.text[idx:overview_idx]
+                rest = digest.text[overview_idx:]
+                digest = DigestOutput(
+                    text=f"{highlight_text}{airline_section}\n\n{rest}",
+                    photo_url=digest.photo_url,
+                    photo_caption=digest.photo_caption,
+                )
+            else:
+                digest = DigestOutput(
+                    text=f"{airline_section}\n\n{digest.text}",
+                    photo_url=digest.photo_url,
+                    photo_caption=digest.photo_caption,
+                )
 
     # Generate traffic chart.
     chart_png = await _generate_chart(chart_query, n_days)

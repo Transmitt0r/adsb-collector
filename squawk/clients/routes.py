@@ -30,6 +30,10 @@ class RouteInfo:
     dest_icao: str | None
     dest_city: str | None
     dest_country: str | None
+    origin_lat: float | None = None
+    origin_lon: float | None = None
+    dest_lat: float | None = None
+    dest_lon: float | None = None
 
 
 class RouteClient(Protocol):
@@ -83,5 +87,9 @@ class RoutesClient:
                     dest_icao=dest.get("icao_code"),
                     dest_city=dest.get("municipality"),
                     dest_country=dest.get("country_name"),
+                    origin_lat=origin.get("latitude"),
+                    origin_lon=origin.get("longitude"),
+                    dest_lat=dest.get("latitude"),
+                    dest_lon=dest.get("longitude"),
                 )
         return None  # unreachable

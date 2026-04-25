@@ -27,6 +27,7 @@ class Config:
     poll_interval: float = 5.0
     session_timeout: float = 300.0
     digest_schedule: str = "15 7 * * *"
+    home_airport: str = "STR"
     enrichment_batch_size: int = 20
     enrichment_flush_interval: float = 30.0
     client_max_retries: int = 3
@@ -48,6 +49,7 @@ class Config:
             poll_interval=float(env.get("POLL_INTERVAL", "5")),
             session_timeout=float(env.get("SESSION_TIMEOUT", "300")),
             digest_schedule=env.get("DIGEST_SCHEDULE", "15 7 * * *"),
+            home_airport=env.get("HOME_AIRPORT", "STR"),
             enrichment_batch_size=int(env.get("ENRICHMENT_BATCH_SIZE", "20")),
             enrichment_flush_interval=float(env.get("ENRICHMENT_FLUSH_SECS", "30")),
             client_max_retries=int(env.get("CLIENT_MAX_RETRIES", "3")),

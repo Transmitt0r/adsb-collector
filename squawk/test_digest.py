@@ -18,9 +18,15 @@ import pytest
 from testcontainers.postgres import PostgresContainer
 
 from squawk.clients.planespotters import PhotoInfo
-from squawk.digest import DigestOutput, generate_digest
+from squawk.digest import DigestOutput, format_airline_stats, generate_digest
 from squawk.queries.charts import ChartQuery
-from squawk.queries.digest import DigestQuery
+from squawk.queries.digest import (
+    AirlineStats,
+    DigestQuery,
+    LongestRoute,
+    OperatorCount,
+    RouteCount,
+)
 from squawk.repositories.digest import DigestRepository
 
 TIMESCALE_IMAGE = "timescale/timescaledb:latest-pg16"
@@ -184,14 +190,19 @@ async def _insert_route(
     dest_iata: str = "CDG",
     dest_city: str = "Paris",
     dest_country: str = "France",
+    origin_lat: float | None = None,
+    origin_lon: float | None = None,
+    dest_lat: float | None = None,
+    dest_lon: float | None = None,
 ) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO callsign_routes
                 (callsign, origin_iata, origin_icao, origin_city, origin_country,
-                 dest_iata, dest_icao, dest_city, dest_country, fetched_at)
-            VALUES ($1, $2, NULL, $3, $4, $5, NULL, $6, $7, now())
+                 dest_iata, dest_icao, dest_city, dest_country,
+                 origin_lat, origin_lon, dest_lat, dest_lon, fetched_at)
+            VALUES ($1, $2, NULL, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, now())
             ON CONFLICT (callsign) DO NOTHING
             """,
             callsign,
@@ -201,6 +212,10 @@ async def _insert_route(
             dest_iata,
             dest_city,
             dest_country,
+            origin_lat,
+            origin_lon,
+            dest_lat,
+            dest_lon,
         )
 
 
@@ -437,3 +452,83 @@ async def test_generate_digest_fetches_photos_for_top_candidates(
     _, _, photos = digest_client.calls[0]
     assert "aaa111" in photos
     assert photos["aaa111"].url == "https://example.com/aaa111.jpg"
+
+
+# ---------------------------------------------------------------------------
+# format_airline_stats — unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_format_airline_stats_empty() -> None:
+    stats = AirlineStats(
+        top_departures=[],
+        top_arrivals=[],
+        top_operators=[],
+        longest_route=None,
+    )
+    assert format_airline_stats(stats) == ""
+
+
+def test_format_airline_stats_full() -> None:
+    stats = AirlineStats(
+        top_departures=[
+            RouteCount(city="Palma de Mallorca", country="Spain", count=5),
+            RouteCount(city="London", country="United Kingdom", count=3),
+        ],
+        top_arrivals=[
+            RouteCount(city="Munich", country="Germany", count=4),
+        ],
+        top_operators=[
+            OperatorCount(operator="Lufthansa", count=12),
+            OperatorCount(operator="Ryanair", count=8),
+        ],
+        longest_route=LongestRoute(
+            callsign="LH400",
+            operator="Lufthansa",
+            origin_city="Frankfurt",
+            dest_city="New York",
+            distance_km=6200,
+        ),
+    )
+    result = format_airline_stats(stats)
+    assert "<b>\u2708\ufe0f Linienverkehr</b>" in result
+    assert "Top Abfl\u00fcge" in result
+    assert "Palma de Mallorca" in result
+    assert "Top Ank\u00fcnfte" in result
+    assert "Munich" in result
+    assert "H\u00e4ufigste Airlines" in result
+    assert "Lufthansa (12)" in result
+    assert "Weiteste Route" in result
+    assert "LH400" in result
+    assert "Frankfurt" in result
+    assert "New York" in result
+    assert "6,200 km" in result
+
+
+def test_format_airline_stats_country_flag() -> None:
+    stats = AirlineStats(
+        top_departures=[
+            RouteCount(city="Berlin", country="DE", count=2),
+        ],
+        top_arrivals=[],
+        top_operators=[],
+        longest_route=None,
+    )
+    result = format_airline_stats(stats)
+    assert "\U0001f1e9\U0001f1ea" in result  # 🇩🇪
+
+
+def test_format_airline_stats_skips_empty_sections() -> None:
+    stats = AirlineStats(
+        top_departures=[],
+        top_arrivals=[
+            RouteCount(city="Munich", country="Germany", count=1),
+        ],
+        top_operators=[],
+        longest_route=None,
+    )
+    result = format_airline_stats(stats)
+    assert "Top Abfl\u00fcge" not in result
+    assert "Top Ank\u00fcnfte" in result
+    assert "H\u00e4ufigste Airlines" not in result
+    assert "Weiteste Route" not in result
